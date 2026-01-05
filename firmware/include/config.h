@@ -15,20 +15,25 @@
 
 // Pin definitions
 #define TOUCH_PIN 3
-#define WHITE_LED_PIN 10   // White LED control (PWM)
-#define WARM_LED_PIN 9     // Warm LED control (PWM)
+#define WHITE_LED_PIN 10    // White LED control (PWM)
+#define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
+#define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
 
 // Maximum brightness for testing (0-255)
 // Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
 #define MAX_BRIGHTNESS 128
+#define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output value (prevents LED completely off)
 
 // Brightness configuration
-#define BRIGHTNESS_STEPS 8      // Number of brightness levels
-#define GAMMA_CORRECTION 2.2    // Gamma curve for perceptual brightness (2.0-2.5 typical)
+#define GAMMA_CORRECTION 2.2        // Gamma curve for perceptual brightness (2.0-2.5 typical)
+#define BRIGHTNESS_INCREMENT_MS 30  // Time between brightness increments when holding (continuous)
+#define MODE_TRANSITION_MS 400      // Smooth fade duration when changing modes (OFF/WHITE/WARM)
 
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
 #define LONG_PRESS_MS 800
-#define BRIGHTNESS_STEP_MS 400  // Time between brightness steps when holding
+#define BRIGHTNESS_STEP_MS 400          // Time between brightness steps when holding
+#define BRIGHTNESS_BOUNDARY_PAUSE_MS 1000  // Longer pause at min/max before reversing
+#define DEEP_SLEEP_TIMEOUT_MS 60000     // Enter deep sleep after 1 minute in OFF state
 
 #endif // CONFIG_H

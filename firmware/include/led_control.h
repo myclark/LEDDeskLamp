@@ -13,14 +13,15 @@ enum LampState {
 
 // External state variables
 extern LampState currentLampState;
-extern uint8_t brightnessLevel;
+extern uint8_t brightness;        // Continuous brightness (0 to MAX_BRIGHTNESS)
 extern int8_t brightnessDirection;
 
 // Function declarations
 void initLED();
 void advanceState();
 void updateLED();
-void stepBrightness();
-void calculateGammaCurve();
+void incrementBrightness();         // Continuous brightness control
+void calculateGammaLUT();
+void updateModeTransition();        // Call from main loop for smooth mode transitions
 
 #endif // LED_CONTROL_H

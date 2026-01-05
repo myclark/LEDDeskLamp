@@ -1,4 +1,5 @@
 #include "touch_input.h"
+#include "led_control.h"  // For boundary detection
 
 // Button state
 static bool lastState = false;
@@ -52,6 +53,12 @@ void updateButton() {
         if (!longPressFired) {
           // It was a tap (released before long press threshold)
           if (onTap) onTap();
+        } else {
+          // Released after long press - reverse direction if at boundary
+          if (brightness == 1 || brightness == MAX_BRIGHTNESS) {
+            brightnessDirection *= -1;  // Reverse for next hold
+            DEBUG_PRINTLN("At boundary - direction reversed for next hold");
+          }
         }
         brightnessStepMode = false;
         DEBUG_PRINTLN("Released");
@@ -68,9 +75,9 @@ void updateButton() {
       }
     }
 
-    // Continue stepping brightness while held
+    // Continuously increment brightness while held (stops automatically at boundaries)
     if (currentState && brightnessStepMode) {
-      if ((millis() - lastBrightnessChange) >= BRIGHTNESS_STEP_MS) {
+      if ((millis() - lastBrightnessChange) >= BRIGHTNESS_INCREMENT_MS) {
         lastBrightnessChange = millis();
         if (onLongPress) onLongPress();
       }
