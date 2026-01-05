@@ -3,6 +3,12 @@
 // Forward declaration
 static void flashBoundaryIndicator();
 
+// LEDC channels for ESP32 PWM
+#define WHITE_LED_CHANNEL 0
+#define WARM_LED_CHANNEL 1
+#define PWM_FREQUENCY 5000  // 5 kHz
+#define PWM_RESOLUTION 8    // 8-bit (0-255)
+
 // Brightness state
 LampState currentLampState = OFF;
 uint8_t brightness = MAX_BRIGHTNESS;       // Continuous brightness (0 to MAX_BRIGHTNESS)
@@ -20,8 +26,17 @@ unsigned long transitionStartTime = 0;
 bool isTransitioning = false;
 
 void initLED() {
-  pinMode(WHITE_LED_PIN, OUTPUT);
-  pinMode(WARM_LED_PIN, OUTPUT);
+  // Configure LEDC PWM channels for ESP32
+  ledcSetup(WHITE_LED_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+  ledcSetup(WARM_LED_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+
+  // Attach pins to PWM channels
+  ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
+  ledcAttachPin(WARM_LED_PIN, WARM_LED_CHANNEL);
+
+  // Initialize to off
+  ledcWrite(WHITE_LED_CHANNEL, 0);
+  ledcWrite(WARM_LED_CHANNEL, 0);
 
   // Calculate gamma-corrected lookup table
   calculateGammaLUT();
@@ -29,7 +44,7 @@ void initLED() {
   // Initialize LEDs to OFF state
   updateLED();
 
-  DEBUG_PRINTLN("LED control initialized");
+  DEBUG_PRINTLN("LED control initialized (LEDC PWM)");
   DEBUG_PRINT("Continuous brightness (0-");
   DEBUG_PRINT(MAX_BRIGHTNESS);
   DEBUG_PRINT("), Gamma: ");
@@ -123,34 +138,39 @@ void incrementBrightness() {
     brightness = (uint8_t)newBrightness;
   }
 
+  // Cancel any ongoing mode transition and update directly
+  isTransitioning = false;
+
   // Directly update PWM (no transition for continuous brightness changes)
   uint8_t pwmValue = gammaLUT[brightness];
   if (currentLampState == WHITE) {
     currentWhitePWM = pwmValue;
     targetWhitePWM = pwmValue;
-    analogWrite(WHITE_LED_PIN, pwmValue);
+    ledcWrite(WHITE_LED_CHANNEL, pwmValue);
+    ledcWrite(WARM_LED_CHANNEL, 0);  // Ensure other LED is off
   } else if (currentLampState == WARM) {
     currentWarmPWM = pwmValue;
     targetWarmPWM = pwmValue;
-    analogWrite(WARM_LED_PIN, pwmValue);
+    ledcWrite(WHITE_LED_CHANNEL, 0);  // Ensure other LED is off
+    ledcWrite(WARM_LED_CHANNEL, pwmValue);
   }
 }
 
 void flashBoundaryIndicator() {
   // Double flash to indicate min/max boundary (more deliberate than single flash)
-  uint8_t activeLEDPin = (currentLampState == WHITE) ? WHITE_LED_PIN : WARM_LED_PIN;
+  uint8_t activeLEDChannel = (currentLampState == WHITE) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
   uint8_t currentPWM = gammaLUT[brightness];
 
   // First flash
-  analogWrite(activeLEDPin, 0);
+  ledcWrite(activeLEDChannel, 0);
   delay(80);
-  analogWrite(activeLEDPin, currentPWM);
+  ledcWrite(activeLEDChannel, currentPWM);
   delay(80);
 
   // Second flash
-  analogWrite(activeLEDPin, 0);
+  ledcWrite(activeLEDChannel, 0);
   delay(80);
-  analogWrite(activeLEDPin, currentPWM);
+  ledcWrite(activeLEDChannel, currentPWM);
 }
 
 void calculateGammaLUT() {
@@ -194,17 +214,15 @@ void updateModeTransition() {
   float progress = (float)elapsed / (float)MODE_TRANSITION_MS;
 
   if (progress >= 1.0) {
-    // Transition complete - snap to target
-    currentWhitePWM = targetWhitePWM;
-    currentWarmPWM = targetWarmPWM;
+    progress = 1.0;
     isTransitioning = false;
-  } else {
-    // Linear interpolation for smooth crossfade
-    currentWhitePWM = startWhitePWM + (targetWhitePWM - startWhitePWM) * progress;
-    currentWarmPWM = startWarmPWM + (targetWarmPWM - startWarmPWM) * progress;
   }
 
-  // Apply current PWM values to LEDs
-  analogWrite(WHITE_LED_PIN, (uint8_t)currentWhitePWM);
-  analogWrite(WARM_LED_PIN, (uint8_t)currentWarmPWM);
+  // Always interpolate for smooth crossfade
+  currentWhitePWM = startWhitePWM + (targetWhitePWM - startWhitePWM) * progress;
+  currentWarmPWM = startWarmPWM + (targetWarmPWM - startWarmPWM) * progress;
+
+  // Apply current PWM values to both LEDs using LEDC
+  ledcWrite(WHITE_LED_CHANNEL, (uint8_t)currentWhitePWM);
+  ledcWrite(WARM_LED_CHANNEL, (uint8_t)currentWarmPWM);
 }

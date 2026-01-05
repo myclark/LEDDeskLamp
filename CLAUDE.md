@@ -16,13 +16,17 @@ LED desk lamp rebuild using salvaged LED assembly with new electronics. The orig
 .
 ├── firmware/          # PlatformIO project for ESP32-C3
 │   ├── src/
-│   │   └── main.cpp   # Main firmware code
-│   ├── lib/           # Custom libraries (if any)
-│   ├── include/       # Header files
-│   └── platformio.ini # Build configuration
+│   │   ├── main.cpp         # Main entry point and callbacks
+│   │   ├── led_control.cpp  # LED state machine and brightness control
+│   │   └── touch_input.cpp  # Touch button debouncing and detection
+│   ├── include/
+│   │   ├── config.h         # All configuration defines
+│   │   ├── led_control.h    # LED control interface
+│   │   └── touch_input.h    # Touch input interface
+│   └── platformio.ini       # Build configuration
 ├── hardware/          # Hardware designs, schematics, PCB files
 └── doc/               # Project documentation
-    └── desk_lamp_project.md  # Complete design document with pinouts, state machine, power budget
+    └── desk_lamp_project.md  # Complete design document
 ```
 
 ## Development Commands
@@ -58,36 +62,105 @@ build_flags =
 
 Physical pin labels on the SuperMini board match GPIO numbers directly:
 - **GPIO3** - Touch sensor input (TTP223 OUT)
-- **GPIO8** - Onboard LED (also I2C SDA, active low)
-- **GPIO9** - White LED control (PWM)
-- **GPIO10** - Warm LED control (PWM)
-- **A0** - Battery voltage monitoring (via voltage divider)
+- **GPIO10** - White LED control (PWM via LEDC channel 0)
+- **GPIO5** - Warm LED control (PWM via LEDC channel 1)
+- **GPIO0** - Battery voltage monitoring (ADC1_CH0, via voltage divider)
+- **GPIO8** - Onboard LED (used for testing, active low)
+
+**Important:** GPIO9 is a strapping pin and causes issues (LED glows during sleep). Use GPIO5 instead for warm LED.
 
 ## Architecture Overview
 
+### Modular Code Structure
+
+The firmware is split into separate modules for maintainability:
+
+**config.h** - All configuration constants:
+- Pin definitions
+- Brightness settings (MAX_BRIGHTNESS, MIN_BRIGHTNESS_PWM, GAMMA_CORRECTION)
+- Timing constants (debounce, long press, transitions, deep sleep)
+- Debug output control (DEBUG flag)
+
+**led_control module** - LED state machine and brightness:
+- Continuous gamma-corrected brightness (0-128 range with LUT)
+- Smooth crossfade transitions between modes (400ms)
+- ESP32 LEDC hardware PWM control (5kHz, 8-bit)
+- Boundary detection with double-flash feedback
+
+**touch_input module** - Capacitive touch handling:
+- 50ms debouncing
+- 800ms long press detection
+- Continuous brightness adjustment while holding
+- Direction reversal at brightness boundaries
+
+**main.cpp** - Setup, loop, and callbacks:
+- WiFi/Bluetooth disabled for power savings
+- Deep sleep after 60s in OFF state
+- Wake from deep sleep via GPIO3 (touch)
+- Minimal loop delay (1ms) for smooth transitions
+
 ### State Machine Design
 
-The lamp operates in four states with touch-based cycling:
-- **OFF** → **WHITE_FULL** → **WARM_FULL** → **BOTH_FULL** → (back to OFF)
-- Long press (>800ms) from any ON state returns to OFF
-- Short tap advances to next state
-
-See `doc/desk_lamp_project.md` for complete state machine diagram.
+The lamp operates in three states with touch-based cycling:
+- **OFF** → **WHITE** → **WARM** → (back to OFF)
+- **Tap:** Cycle to next state with smooth crossfade
+- **Hold:** Continuously adjust brightness (gamma corrected)
+- **Boundary:** Double flash when reaching min/max brightness
 
 ### Current Implementation Status
 
-**Implemented (in main.cpp):**
-- Touch input debouncing (50ms threshold)
-- Long press detection (800ms threshold)
-- Callback-based event handling
-- Serial debugging output
+**Fully Implemented:**
+- ✅ Modular code structure (config, led_control, touch_input, main)
+- ✅ Touch input debouncing (50ms) and long press detection (800ms)
+- ✅ State machine (OFF/WHITE/WARM with smooth transitions)
+- ✅ Continuous gamma-corrected brightness control (not discrete steps)
+- ✅ Smooth crossfade transitions between modes (400ms)
+- ✅ ESP32 LEDC PWM control for flicker-free dimming
+- ✅ Minimum brightness enforcement (never fully off when in ON state)
+- ✅ Boundary detection with double-flash feedback
+- ✅ Deep sleep mode after 60s in OFF state (~26µA)
+- ✅ Wake from deep sleep on touch (goes directly to WHITE)
+- ✅ WiFi and Bluetooth disabled for power savings
+- ✅ Debug output with compile-time control (DEBUG flag)
 
-**TODO (see main.cpp comments):**
-- State machine implementation (handleTap/handleLongPress functions)
-- LED PWM control on GPIO9/10
-- Battery voltage monitoring on A0
-- Low-battery warning (3× pulse when entering ON state below 3.5V)
-- Deep sleep mode in OFF state
+**TODO:**
+- Battery voltage monitoring on GPIO0
+- Low-battery warning (visual indication when < 3.5V)
+- Adjust MAX_BRIGHTNESS from 128 to 255 for full battery voltage operation
+
+### Brightness Control Implementation
+
+**Gamma Correction:**
+- Full lookup table (LUT) from 0-MAX_BRIGHTNESS
+- Gamma = 2.2 for perceptual brightness
+- MIN_BRIGHTNESS_PWM enforced (value of 1) to prevent completely off
+- Entry [0] stays at 0 for OFF state transitions
+
+**Continuous Dimming:**
+- Hold button → brightness increments/decrements every 30ms
+- Uses full brightness range (not discrete steps)
+- Smoothly indexes into gamma LUT
+- Direction reverses at boundaries (min/max)
+- Double flash indicates boundary reached
+
+**Mode Transitions:**
+- Smooth 400ms crossfade when tapping between modes
+- Linear interpolation between gamma-corrected PWM values
+- Both LEDs updated simultaneously for seamless transitions
+- Uses ESP32 LEDC for hardware PWM (5kHz, 8-bit resolution)
+
+### Power Management
+
+**Deep Sleep:**
+- Enters deep sleep after 60 seconds in OFF state
+- GPIO3 (touch) configured as wake source (ESP_GPIO_WAKEUP_GPIO_HIGH)
+- On wake, system resets and goes directly to WHITE mode
+- Deep sleep current: ~10µA (ESP32-C3) + 1.5µA (TTP223) + 15µA (voltage divider) = ~26µA
+
+**Power Optimization:**
+- WiFi and Bluetooth disabled on startup (btStop(), WiFi.mode(WIFI_OFF))
+- Direct LEDC PWM (no Arduino wrapper overhead)
+- Minimal loop delay (1ms) for responsive transitions
 
 ### Battery Management
 
@@ -100,21 +173,53 @@ See `doc/desk_lamp_project.md` for complete state machine diagram.
 - 3.2V - Critical
 - 3.0V - Hard cutoff (protect battery)
 
-**ADC configuration needed:**
+**ADC configuration (when implemented):**
 ```cpp
-analogReference(INTERNAL); // Use 1.1V internal reference for stable readings
+// ESP32-C3 ADC setup for battery monitoring
+analogReadResolution(12);  // 12-bit ADC (0-4095)
+// Read from GPIO0 (ADC1_CH0)
+int adcValue = analogRead(BATTERY_PIN);
+float voltage = adcValue * (3.3 / 4095.0) * (127.0 / 27.0);  // Voltage divider compensation
 ```
 
 ### Power Budget
 - **OFF (deep sleep):** ~26µA total → ~10 years standby (theoretical)
-- **ON (full brightness):** 120-180mA → 14-20 hours continuous runtime (2500mAh battery)
+- **ON (full brightness at 50% PWM):** 60-90mA → 28-40 hours runtime (2500mAh battery)
+- **ON (full brightness at 100% PWM):** 120-180mA → 14-20 hours runtime (when MAX_BRIGHTNESS = 255)
 
 ## Important Design Constraints
 
 1. **Direct battery power:** ESP32-C3 runs on battery voltage (2.3V-3.6V range), no regulator
 2. **Touch module wake:** TTP223 active-high output enables deep sleep mode
-3. **Common cathode LEDs:** MOSFETs switch LEDs to ground
+3. **Common anode LEDs:** Common wire to VCC, MOSFETs switch LED cathodes to ground
 4. **High-Z voltage divider:** Minimizes parasitic drain during sleep
+5. **GPIO9 is strapping pin:** Causes LED to glow during sleep/programming - use GPIO5 instead
+6. **LEDC PWM required:** Direct LEDC control (not analogWrite) for smooth transitions
+
+## Configuration Options
+
+Key settings in `include/config.h`:
+
+```cpp
+// Pin assignments
+#define TOUCH_PIN 3
+#define WHITE_LED_PIN 10
+#define WARM_LED_PIN 5
+#define BATTERY_PIN 0
+
+// Brightness (0-255)
+#define MAX_BRIGHTNESS 128           // Set to 255 for full battery operation
+#define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output (prevents completely off)
+#define GAMMA_CORRECTION 2.2         // Perceptual brightness curve
+
+// Timing (milliseconds)
+#define BRIGHTNESS_INCREMENT_MS 30   // How fast brightness changes when holding
+#define MODE_TRANSITION_MS 400       // Crossfade duration between modes
+#define DEEP_SLEEP_TIMEOUT_MS 60000  // Time in OFF before deep sleep
+
+// Debug
+#define DEBUG 1                      // Set to 0 to disable all Serial output
+```
 
 ## Reference Documentation
 
