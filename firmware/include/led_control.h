@@ -1,0 +1,26 @@
+#ifndef LED_CONTROL_H
+#define LED_CONTROL_H
+
+#include <Arduino.h>
+#include "config.h"
+
+// Lamp states
+enum LampState {
+  OFF,
+  WHITE,
+  WARM
+};
+
+// External state variables
+extern LampState currentLampState;
+extern uint8_t brightnessLevel;
+extern int8_t brightnessDirection;
+
+// Function declarations
+void initLED();
+void advanceState();
+void updateLED();
+void stepBrightness();
+void calculateGammaCurve();
+
+#endif // LED_CONTROL_H
