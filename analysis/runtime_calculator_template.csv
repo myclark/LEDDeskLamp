@@ -1,0 +1,26 @@
+LED Desk Lamp Runtime Calculator,,,,,,
+,,,,,,
+Paste your measurement data in columns A and B below:,,,,,,
+,,,,,,
+Voltage (V),Current (mA),,Battery Capacity (mAh),Average Current (mA),Runtime (hours),Runtime (days)
+4.2,,,2000,=AVERAGE(B6:B18),=D6/E6,=F6/24
+4.1,,,2500,=AVERAGE(B6:B18),=D7/E7,=F7/24
+4.0,,,3000,=AVERAGE(B6:B18),=D8/E8,=F8/24
+3.9,,,,,,
+3.8,,,Battery Voltage Stats:,,Min Voltage,=MIN(A6:A18)
+3.7,,,,,Max Voltage,=MAX(A6:A18)
+3.6,,,,,Avg Voltage,=AVERAGE(A6:A18)
+3.5,,,,,,,
+3.4,,,Current Stats:,,Min Current,=MIN(B6:B18)
+3.3,,,,,Max Current,=MAX(B6:B18)
+3.2,,,,,Avg Current,=AVERAGE(B6:B18)
+3.1,,,,,,,
+3.0,,,Power Stats:,,Avg Power (mW),=AVERAGE(A6:A18)*AVERAGE(B6:B18)
+,,,,,,
+Instructions:,,,,,,
+"1. Copy your voltage and current measurements into columns A and B (rows 6-18)",,,,,,
+2. The formulas in columns D-G will automatically calculate runtime for different battery capacities,,,,,,
+3. Adjust battery capacity values in column D as needed,,,,,,
+4. Add more voltage steps if needed (copy formulas down),,,,,,
+,,,,,,
+Note: This uses simple averaging. For more accurate results use the Python script.,,,,,,

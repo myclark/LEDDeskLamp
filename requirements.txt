@@ -1,0 +1,8 @@
+# Python dependencies for LED Desk Lamp project
+
+# Currently no Python dependencies required for this project
+# (Analysis tools are standalone scripts with no external deps)
+
+# Optional: for future enhancements
+# matplotlib  # For plotting battery discharge curves
+# numpy       # For advanced battery modeling

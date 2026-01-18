@@ -4,9 +4,11 @@
 #include "config.h"
 #include "led_control.h"
 #include "touch_input.h"
+#include "battery_monitor.h"
 
 // Deep sleep timeout tracking
 unsigned long offStateStartTime = 0;
+bool justWokeFromSleep = false;  // Track if we just woke from deep sleep
 
 // Forward declarations
 void enterDeepSleep();
@@ -15,8 +17,39 @@ void enterDeepSleep();
 void handleTap() {
   DEBUG_PRINTLN(">>> TAP detected!");
   offStateStartTime = 0;  // Reset sleep timer on any interaction
+
+  // Read battery state immediately (fresh reading)
+  readBatteryVoltage();
+  BatteryState batteryState = getBatteryState();
+
+  // CUTOFF: Refuse to turn on, go to deep sleep
+  if (batteryState == BATTERY_CUTOFF) {
+    DEBUG_PRINTLN("Battery CUTOFF - refusing to turn on");
+    currentLampState = OFF;
+    updateLED();
+    delay(1000);  // Brief delay to show the debug message
+    enterDeepSleep();
+    return;  // Won't reach here, but for clarity
+  }
+
+  // Advance state normally
   advanceState();
   updateLED();
+
+  // Display battery status on mode change
+  displayBatteryStatus();
+
+  // Flash warning based on battery state
+  if (currentLampState != OFF) {
+    if (batteryState == BATTERY_CRITICAL) {
+      // CRITICAL: Flash on every mode change
+      flashLowBatteryWarning();
+    } else if (batteryState == BATTERY_LOW && justWokeFromSleep) {
+      // LOW: Flash only when waking from deep sleep
+      flashLowBatteryWarning();
+      justWokeFromSleep = false;  // Clear flag after first tap
+    }
+  }
 }
 
 // Callback: Handle long press / continuous brightness adjustment
@@ -40,6 +73,7 @@ void setup() {
   // Initialize modules
   initTouch();
   initLED();
+  initBatteryMonitor();
 
   // Register callbacks
   setTapCallback(handleTap);
@@ -48,10 +82,18 @@ void setup() {
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     // Woke from deep sleep via touch - go directly to WHITE state
     DEBUG_PRINTLN("Woke from deep sleep!");
+
+    // Disable GPIO hold to allow PWM control again
+    gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
+    gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
+
+    justWokeFromSleep = true;  // Set flag for LOW battery warning behavior
+
     currentLampState = WHITE;
     updateLED();
   } else {
     DEBUG_PRINTLN("Power-on or reset");
+    justWokeFromSleep = false;  // Not a wake from sleep
   }
 
   DEBUG_PRINTLN("Lamp ready");
@@ -65,6 +107,7 @@ void setup() {
 void loop() {
   updateButton();
   updateModeTransition();  // Smooth crossfade between modes (OFF/WHITE/WARM)
+  updateBatteryMonitor();  // Periodic battery voltage monitoring
 
   // Track time in OFF state for deep sleep
   if (currentLampState == OFF) {
@@ -85,9 +128,19 @@ void enterDeepSleep() {
   DEBUG_PRINTLN("Entering deep sleep...");
   DEBUG_PRINTLN("Touch button to wake");
 
-  // Ensure LEDs are completely off
-  analogWrite(WHITE_LED_PIN, 0);
-  analogWrite(WARM_LED_PIN, 0);
+  // Ensure LEDs are completely off using LEDC (not analogWrite)
+  ledcWrite(0, 0);  // WHITE_LED_CHANNEL
+  ledcWrite(1, 0);  // WARM_LED_CHANNEL
+
+  // CRITICAL: Set GPIO pins to OUTPUT LOW and HOLD them during deep sleep
+  // This prevents GPIO leakage from partially turning on MOSFETs
+  pinMode(WHITE_LED_PIN, OUTPUT);
+  digitalWrite(WHITE_LED_PIN, LOW);
+  gpio_hold_en((gpio_num_t)WHITE_LED_PIN);  // Hold GPIO10 LOW during sleep
+
+  pinMode(WARM_LED_PIN, OUTPUT);
+  digitalWrite(WARM_LED_PIN, LOW);
+  gpio_hold_en((gpio_num_t)WARM_LED_PIN);   // Hold GPIO5 LOW during sleep
 
   // Configure wake on GPIO3 (TOUCH_PIN) going HIGH
   // ESP32-C3 uses gpio_wakeup for deep sleep wake

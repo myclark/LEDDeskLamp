@@ -8,7 +8,7 @@ LED desk lamp rebuild using salvaged LED assembly with new electronics. The orig
 
 **Hardware:** ESP32-C3 SuperMini, TP4056 USB-C charger, 18650 Li-ion battery, TTP223 capacitive touch sensor, N-channel MOSFETs for LED control.
 
-**Key Feature:** Direct battery-to-MCU power (bypassing regulator) to use full battery capacity down to ~3.0V.
+**Key Feature:** Battery connected to 5V input (using onboard regulator to provide stable 3.3V to ESP32, which accepts 3.0-5.5V input). LEDs powered directly from battery voltage for full brightness range.
 
 ## Repository Structure
 
@@ -24,7 +24,11 @@ LED desk lamp rebuild using salvaged LED assembly with new electronics. The orig
 │   │   ├── led_control.h    # LED control interface
 │   │   └── touch_input.h    # Touch input interface
 │   └── platformio.ini       # Build configuration
-├── hardware/          # Hardware designs, schematics, PCB files
+├── hardware/          # Hardware designs (to be added)
+├── analysis/          # Power analysis and runtime prediction
+│   ├── analyze_runtime.py   # Runtime analysis script
+│   ├── templates/           # CSV templates for measurements
+│   └── data/                # Measurement data files
 └── doc/               # Project documentation
     └── desk_lamp_project.md  # Complete design document
 ```
@@ -123,6 +127,11 @@ The lamp operates in three states with touch-based cycling:
 - ✅ WiFi and Bluetooth disabled for power savings
 - ✅ Debug output with compile-time control (DEBUG flag)
 
+**Known Issues & Fixes:**
+- ✅ **LED ghosting in OFF state**: PWM=0 may not guarantee 0V on GPIO
+  - Fix: Detach PWM and force GPIO LOW when in OFF state
+  - Re-attach PWM when transitioning from OFF to WHITE/WARM
+
 **TODO:**
 - Battery voltage monitoring on GPIO0
 - Low-battery warning (visual indication when < 3.5V)
@@ -154,8 +163,11 @@ The lamp operates in three states with touch-based cycling:
 **Deep Sleep:**
 - Enters deep sleep after 60 seconds in OFF state
 - GPIO3 (touch) configured as wake source (ESP_GPIO_WAKEUP_GPIO_HIGH)
+- **CRITICAL:** GPIO10/GPIO5 must use `gpio_hold_en()` to prevent LED glow during sleep
+  - Without hold, GPIO leakage can partially turn on MOSFETs
+  - Must call `gpio_hold_dis()` on wake to re-enable PWM control
 - On wake, system resets and goes directly to WHITE mode
-- Deep sleep current: ~10µA (ESP32-C3) + 1.5µA (TTP223) + 15µA (voltage divider) = ~26µA
+- Deep sleep current: ~10µA (ESP32-C3) + 1.5µA (TTP223) + 11µA (voltage divider) = ~22.5µA
 
 **Power Optimization:**
 - WiFi and Bluetooth disabled on startup (btStop(), WiFi.mode(WIFI_OFF))
@@ -164,7 +176,7 @@ The lamp operates in three states with touch-based cycling:
 
 ### Battery Management
 
-**Voltage divider:** 100kΩ (high) + 27kΩ (low) = high impedance to minimize drain (~15µA @ 3.7V)
+**Voltage divider:** 100kΩ (high) + 33kΩ (low) = high impedance to minimize drain (~11µA @ 3.7V)
 
 **Critical thresholds:**
 - 4.2V - Fully charged
@@ -179,22 +191,25 @@ The lamp operates in three states with touch-based cycling:
 analogReadResolution(12);  // 12-bit ADC (0-4095)
 // Read from GPIO0 (ADC1_CH0)
 int adcValue = analogRead(BATTERY_PIN);
-float voltage = adcValue * (3.3 / 4095.0) * (127.0 / 27.0);  // Voltage divider compensation
+float voltage = adcValue * (3.3 / 4095.0) * (133.0 / 33.0);  // Voltage divider compensation
+// Scaling factor: 4.030 (gives 1.042V at 4.2V battery)
 ```
 
 ### Power Budget
-- **OFF (deep sleep):** ~26µA total → ~10 years standby (theoretical)
+- **OFF (deep sleep):** ~22.5µA total → ~12 years standby (theoretical)
 - **ON (full brightness at 50% PWM):** 60-90mA → 28-40 hours runtime (2500mAh battery)
 - **ON (full brightness at 100% PWM):** 120-180mA → 14-20 hours runtime (when MAX_BRIGHTNESS = 255)
 
 ## Important Design Constraints
 
-1. **Direct battery power:** ESP32-C3 runs on battery voltage (2.3V-3.6V range), no regulator
-2. **Touch module wake:** TTP223 active-high output enables deep sleep mode
-3. **Common anode LEDs:** Common wire to VCC, MOSFETs switch LED cathodes to ground
-4. **High-Z voltage divider:** Minimizes parasitic drain during sleep
-5. **GPIO9 is strapping pin:** Causes LED to glow during sleep/programming - use GPIO5 instead
-6. **LEDC PWM required:** Direct LEDC control (not analogWrite) for smooth transitions
+1. **Regulated power path:** Battery connects to 5V input, onboard regulator provides 3.3V to ESP32-C3 (chip operates 3.0-3.6V internally)
+2. **LED power:** LED common V+ connected to battery voltage (via 5V input) for full brightness capability
+3. **MOSFET gate resistors:** 120Ω series + 10kΩ pull-down on each gate (prevents floating during boot/reset)
+4. **Touch module wake:** TTP223 active-high output enables deep sleep mode
+5. **Common anode LEDs:** Common wire to battery V+, MOSFETs switch LED cathodes to ground
+6. **High-Z voltage divider:** Minimizes parasitic drain during sleep (100kΩ + 33kΩ = 133kΩ total, ~11µA)
+7. **GPIO9 is strapping pin:** Causes LED to glow during sleep/programming - use GPIO5 instead
+8. **LEDC PWM required:** Direct LEDC control (not analogWrite) for smooth transitions
 
 ## Configuration Options
 

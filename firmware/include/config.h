@@ -19,6 +19,10 @@
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
 #define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
 
+// Battery voltage calibration
+#define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
+#define BMS_VOLTAGE_DROP 0.090        // TP4056 MOSFET voltage drop (~90mV)
+
 // Maximum brightness for testing (0-255)
 // Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
 #define MAX_BRIGHTNESS 128

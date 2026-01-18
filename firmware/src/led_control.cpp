@@ -1,4 +1,5 @@
 #include "led_control.h"
+#include "battery_monitor.h"
 
 // Forward declaration
 static void flashBoundaryIndicator();
@@ -69,6 +70,15 @@ void updateLED() {
   // Get gamma-corrected PWM value for current brightness
   uint8_t pwmValue = gammaLUT[brightness];
 
+  // If transitioning FROM OFF state, re-attach PWM pins
+  static LampState previousState = OFF;
+  if (previousState == OFF && currentLampState != OFF) {
+    ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
+    ledcAttachPin(WARM_LED_PIN, WARM_LED_CHANNEL);
+    DEBUG_PRINTLN("Transitioning from OFF: PWM re-attached");
+  }
+  previousState = currentLampState;
+
   // Set target PWM values for smooth mode transition
   switch (currentLampState) {
     case OFF:
@@ -117,14 +127,17 @@ void incrementBrightness() {
 
   uint8_t oldBrightness = brightness;
 
+  // Get battery-limited max brightness (may be reduced in CRITICAL state)
+  uint8_t effectiveMaxBrightness = getBatteryLimitedMaxBrightness();
+
   // Continuously increment/decrement brightness
   int newBrightness = (int)brightness + brightnessDirection;
 
-  // Clamp at boundaries (1 to MAX_BRIGHTNESS) and flash
+  // Clamp at boundaries (1 to effectiveMaxBrightness) and flash
   // Note: brightness=1 outputs MIN_BRIGHTNESS_PWM from LUT
-  if (newBrightness >= MAX_BRIGHTNESS) {
-    brightness = MAX_BRIGHTNESS;
-    if (oldBrightness != MAX_BRIGHTNESS) {
+  if (newBrightness >= effectiveMaxBrightness) {
+    brightness = effectiveMaxBrightness;
+    if (oldBrightness != effectiveMaxBrightness) {
       DEBUG_PRINTLN("(Reached MAX - release and hold again to dim)");
       flashBoundaryIndicator();
     }
@@ -136,6 +149,14 @@ void incrementBrightness() {
     }
   } else {
     brightness = (uint8_t)newBrightness;
+  }
+
+  // Clamp existing brightness if it exceeds new max (battery went to CRITICAL)
+  if (brightness > effectiveMaxBrightness) {
+    brightness = effectiveMaxBrightness;
+    DEBUG_PRINT("Brightness clamped to ");
+    DEBUG_PRINT(effectiveMaxBrightness);
+    DEBUG_PRINTLN(" (battery CRITICAL)");
   }
 
   // Cancel any ongoing mode transition and update directly
@@ -225,4 +246,46 @@ void updateModeTransition() {
   // Apply current PWM values to both LEDs using LEDC
   ledcWrite(WHITE_LED_CHANNEL, (uint8_t)currentWhitePWM);
   ledcWrite(WARM_LED_CHANNEL, (uint8_t)currentWarmPWM);
+
+  // CRITICAL FIX: When transition to OFF is complete, detach PWM and force GPIO LOW
+  // This ensures true 0V output instead of relying on PWM=0 which may have leakage
+  if (!isTransitioning && currentLampState == OFF) {
+    if (currentWhitePWM == 0 && currentWarmPWM == 0) {
+      // Detach LEDC PWM and set pins to OUTPUT LOW
+      ledcDetachPin(WHITE_LED_PIN);
+      ledcDetachPin(WARM_LED_PIN);
+      pinMode(WHITE_LED_PIN, OUTPUT);
+      pinMode(WARM_LED_PIN, OUTPUT);
+      digitalWrite(WHITE_LED_PIN, LOW);
+      digitalWrite(WARM_LED_PIN, LOW);
+      DEBUG_PRINTLN("OFF: PWM detached, pins forced LOW");
+    }
+  }
+}
+
+void flashLowBatteryWarning() {
+  // Triple flash to indicate low battery (only when lamp is ON)
+  if (currentLampState == OFF) {
+    return;  // Don't flash when lamp is off
+  }
+
+  uint8_t activeLEDChannel = (currentLampState == WHITE) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
+  uint8_t currentPWM = gammaLUT[brightness];
+
+  // Save current transition state and cancel it
+  bool wasTransitioning = isTransitioning;
+  isTransitioning = false;
+
+  // Triple flash pattern (more urgent than boundary double flash)
+  for (int i = 0; i < 3; i++) {
+    ledcWrite(activeLEDChannel, 0);
+    delay(100);
+    ledcWrite(activeLEDChannel, currentPWM);
+    delay(100);
+  }
+
+  // Restore transition state if needed
+  isTransitioning = wasTransitioning;
+
+  DEBUG_PRINTLN("Low battery warning flashed");
 }

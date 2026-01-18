@@ -23,5 +23,6 @@ void updateLED();
 void incrementBrightness();         // Continuous brightness control
 void calculateGammaLUT();
 void updateModeTransition();        // Call from main loop for smooth mode transitions
+void flashLowBatteryWarning();      // Flash LEDs to indicate low battery
 
 #endif // LED_CONTROL_H
