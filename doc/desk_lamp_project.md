@@ -18,10 +18,11 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
 
 1. Reliable charging and power management
 2. Improved battery capacity (2000-3000mAh)
-3. Low-battery warning indicator
-4. Simple operation (press to cycle modes, long-press for off)
-5. Efficient power usage with deep sleep capability
-6. Easy to build on perfboard with through-hole components
+3. Low-battery warning indicator with intelligent state machine
+4. Intuitive operation (tap to cycle modes, hold for brightness adjustment)
+5. Efficient power usage with deep sleep capability (~22.5µA)
+6. Smooth gamma-corrected brightness control
+7. Easy to build on perfboard with through-hole components
 
 ## Components List
 
@@ -258,162 +259,118 @@ float voltage = adcValue * (3.3 / 4095.0) * (122.0 / 22.0);  // Scaling factor =
 
 ## State Machine Design
 
+### Lamp States
+
+The lamp operates in three states with touch-based cycling:
+
 ```
-┌─────────────────────────────────────────────────┐
-│  STARTUP                                        │
-│  └→ Check battery voltage                      │
-│     └→ If low: set warning flag                │
-└────────────┬────────────────────────────────────┘
-             │
-             ▼
         ┌────────┐
-        │  OFF   │ ◄──────────────┐
-        │        │                │
-        │ LEDs:  │                │
-        │  Both  │                │
-        │  off   │                │
-        └────┬───┘                │
-             │                    │
-      Touch detected             │
-             │               Long press
-             ▼               (>2s)
-        ┌────────┐               │
-        │ WHITE  │───────────────┘
-        │  FULL  │
-        │        │
-        │ LEDs:  │
-        │  White │
-        │  100%  │
-        └────┬───┘
-             │
-      Touch detected
-             │
-             ▼
-        ┌────────┐
-        │  WARM  │
-        │  FULL  │
-        │        │
-        │ LEDs:  │
-        │  Warm  │
-        │  100%  │
-        └────┬───┘
-             │
-      Touch detected
-             │
-             ▼
-        ┌────────┐
-        │  BOTH  │
-        │  FULL  │
-        │        │
-        │ LEDs:  │
-        │  Both  │
-        │  100%  │
-        └────┬───┘
-             │
-      Touch detected
-             │
-             └──────► (cycle back to OFF)
+        │  OFF   │ ◄──────────────────────────────┐
+        │        │                                │
+        │ LEDs:  │                                │
+        │  Both  │                                │
+        │  off   │                                │
+        └────┬───┘                                │
+             │                                    │
+     Tap (touch)                                  │
+             │                                    │
+             ▼                                    │
+        ┌────────┐                                │
+        │ WHITE  │                                │
+        │        │                                │
+        │ LEDs:  │──── Hold: adjust brightness    │
+        │  White │     (gamma corrected)          │
+        │  on    │                                │
+        └────┬───┘                                │
+             │                                    │
+         Tap │                                    │
+             ▼                                    │
+        ┌────────┐                                │
+        │  WARM  │                                │
+        │        │                                │
+        │ LEDs:  │──── Hold: adjust brightness    │
+        │  Warm  │     (gamma corrected)          │
+        │  on    │                                │
+        └────┬───┘                                │
+             │                                    │
+         Tap └────────────────────────────────────┘
 ```
 
 ### State Behaviours
 
 **OFF State:**
-- Both MOSFETs off
-- MCU in deep sleep mode
-- Wake on touch interrupt
-- Minimal power draw (~10µA)
+- Both MOSFETs off (GPIO held LOW to prevent leakage)
+- Deep sleep after 60 seconds of inactivity
+- Wake on touch interrupt (GPIO3 HIGH)
+- Minimal power draw (~22.5µA in deep sleep)
 
-**ON States (WHITE / WARM / BOTH):**
-- Appropriate MOSFET(s) enabled via PWM
-- Periodic battery voltage checks
-- Respond to touch for state changes
-- Monitor for long-press (return to OFF)
+**ON States (WHITE / WARM):**
+- Single MOSFET enabled via hardware PWM (LEDC)
+- Smooth 400ms crossfade transition when changing modes
+- Tap to cycle to next state
+- Hold (>800ms) to adjust brightness continuously
+- Brightness uses gamma correction (LUT) for perceptual linearity
+- Double flash indicates brightness boundary reached
+- Direction reverses at min/max boundaries
 
-**Low Battery Warning:**
-When entering any ON state with battery voltage < 3.5V:
-- Pulse all active LEDs 3× quickly before settling to steady state
-- Alternative: Brief simultaneous flash of both LED strings
+### Battery State Machine
+
+Battery monitoring runs in parallel with hysteresis to prevent state flickering:
+
+| State | Voltage | Behaviour |
+|-------|---------|-----------|
+| NORMAL | > 3.5V | Full operation |
+| LOW | 3.2V - 3.5V | Flash warning on wake from deep sleep |
+| CRITICAL | 3.0V - 3.2V | Flash every mode change, brightness limited to 50% |
+| CUTOFF | < 3.0V | Refuse to turn on, enter deep sleep immediately |
+
+**Hysteresis:** Requires 3 consecutive readings (90 seconds) to enter CRITICAL, and voltage must rise 100-200mV to recover to a higher state.
 
 ### Optional Future Features
-- **Dimming mode:** Hold touch for >500ms to cycle through brightness levels (100% → 75% → 50% → 25%)
-- **Memory:** Remember last used mode/brightness
+- **Memory:** Remember last used mode/brightness across power cycles
 - **Auto-off timer:** Sleep after X minutes of inactivity
 
 ## Software Architecture
 
-### Core Functions Needed
+### Module Structure
 
-1. **Touch detection** - Interrupt-driven on D2/INT pin
-2. **PWM LED control** - Smooth brightness control on D9, D10
-3. **Battery monitoring** - Periodic ADC reads on A0
-4. **State management** - Handle state transitions and timing
-5. **Sleep mode** - Deep sleep in OFF state, wake on interrupt
-6. **Debouncing** - Clean touch event handling
+The firmware is organised into four modules plus main:
 
-### Pseudo-code Structure
+**config.h** - Centralised configuration:
+- Pin definitions for GPIO3 (touch), GPIO10 (white LED), GPIO5 (warm LED), GPIO0 (battery ADC)
+- Timing constants (debounce, long press, transitions, deep sleep timeout)
+- Brightness settings (max, min PWM, gamma correction value)
+- Battery calibration factors (ADC correction, BMS voltage drop)
 
-```cpp
-// Pin definitions
-#define TOUCH_PIN 2        // Interrupt pin
-#define WHITE_LED 9        // PWM pin
-#define WARM_LED 10        // PWM pin
-#define BATTERY_PIN A0     // ADC pin
+**led_control** - LED state machine and PWM:
+- Three states: OFF, WHITE, WARM
+- Gamma-corrected brightness using a 129-entry lookup table (γ = 2.2)
+- Smooth 400ms crossfade transitions using linear interpolation
+- ESP32 LEDC hardware PWM at 5kHz, 8-bit resolution
+- Boundary detection with double-flash feedback at min/max brightness
+- PWM detach and GPIO hold for clean OFF state (prevents LED ghosting)
 
-// States
-enum State {
-  OFF,
-  WHITE_FULL,
-  WARM_FULL,
-  BOTH_FULL
-};
+**touch_input** - Capacitive touch handling:
+- 50ms debouncing for stable state detection
+- 800ms threshold for long press detection
+- Callback-based architecture (setTapCallback, setLongPressCallback)
+- Continuous brightness adjustment every 30ms while holding
+- Direction tracking with automatic reversal at boundaries
 
-State currentState = OFF;
-bool lowBatteryFlag = false;
+**battery_monitor** - Battery voltage monitoring:
+- 12-bit ADC with 11dB attenuation, 8-sample averaging
+- Calibration factor and BMS voltage drop compensation
+- Four-state machine: NORMAL → LOW → CRITICAL → CUTOFF
+- Hysteresis to prevent state flickering (3 consecutive readings, 100-200mV recovery margin)
+- Brightness limiting to 50% in CRITICAL state
+- Reads every 30 seconds, displays every 60 seconds or on significant change
 
-void setup() {
-  analogReadResolution(12);   // ESP32-C3: 12-bit ADC
-  pinMode(WHITE_LED, OUTPUT);
-  pinMode(WARM_LED, OUTPUT);
-  pinMode(TOUCH_PIN, INPUT);
-
-  attachInterrupt(digitalPinToInterrupt(TOUCH_PIN), touchISR, RISING);
-
-  checkBatteryLevel();
-}
-
-void loop() {
-  if (currentState == OFF) {
-    enterDeepSleep();
-  } else {
-    updateLEDs();
-    
-    if (millis() % 10000 == 0) {  // Check every 10s
-      checkBatteryLevel();
-    }
-    
-    handleLongPress();  // Check for return to OFF
-  }
-}
-
-void touchISR() {
-  // Handle touch event
-  // Advance state machine
-  // Show low battery warning if flag set
-}
-
-void checkBatteryLevel() {
-  int adcValue = analogRead(BATTERY_PIN);  // GPIO0
-  // ESP32-C3: 12-bit ADC, 3.3V reference
-  // Voltage divider: 100kΩ + 33kΩ, scaling factor = 133/33 = 4.030
-  float voltage = adcValue * (3.3 / 4095.0) * (133.0 / 33.0);
-
-  if (voltage < 3.5) {
-    lowBatteryFlag = true;
-  } else {
-    lowBatteryFlag = false;
-  }
-}
-```
+**main.cpp** - Application entry point:
+- WiFi and Bluetooth disabled on startup for power savings
+- Registers tap and long-press callbacks
+- Handles deep sleep entry after 60s in OFF state
+- GPIO hold enable/disable for clean sleep/wake transitions
+- Battery state checks on mode change with appropriate warnings
 
 ## Build Notes
 
@@ -430,19 +387,19 @@ void checkBatteryLevel() {
 - **Battery holder:** Secure mounting, consider spring contacts vs solder tabs
 
 ### Testing Checklist
-- [ ] Verify voltage divider scaling (4.2V battery → ~1.042V at GPIO0 with 33kΩ)
-- [ ] Confirm onboard regulator operates down to 3.0V input at 5V pin
-- [ ] Test MOSFET switching at low battery voltages
-- [ ] Verify gate resistors prevent LED glow during ESP32 boot/programming
-- [ ] **CRITICAL:** Test LEDs are completely off in OFF state (no faint glow)
-  - **During normal OFF state**: PWM=0 may not guarantee 0V, causing LED ghosting
-    - Fix: Detach PWM (`ledcDetachPin()`) and force GPIO LOW (`digitalWrite(pin, LOW)`)
-  - **During deep sleep**: GPIO leakage can partially turn on MOSFETs
-    - Fix: Use `gpio_hold_en()` before sleep, `gpio_hold_dis()` on wake
-- [ ] Measure standby current in OFF state (target ~22.5µA)
-- [ ] Verify charging indication on TP4056
-- [ ] Test all state transitions
-- [ ] Verify low battery warning triggers correctly
+- [x] Verify voltage divider scaling (4.2V battery → ~1.042V at GPIO0 with 33kΩ)
+- [x] Confirm onboard regulator operates down to 3.0V input at 5V pin
+- [x] Test MOSFET switching at low battery voltages
+- [x] Verify gate resistors prevent LED glow during ESP32 boot/programming
+- [x] **CRITICAL:** Test LEDs are completely off in OFF state (no faint glow)
+  - **During normal OFF state**: PWM detached, GPIO forced LOW
+  - **During deep sleep**: `gpio_hold_en()` keeps GPIOs LOW
+- [x] Measure standby current in OFF state (target ~22.5µA)
+- [x] Verify charging indication on TP4056
+- [x] Test all state transitions (OFF → WHITE → WARM → OFF)
+- [x] Verify low battery warning triggers correctly (LOW: flash on wake, CRITICAL: flash every mode change)
+- [x] Test brightness adjustment (hold to dim, gamma correction, boundary detection)
+- [x] Unit tests pass (9 tests for battery state machine)
 - [ ] Measure runtime at different brightness levels
 
 ## Power Budget Estimates
@@ -516,6 +473,12 @@ Even though wireless features aren't initially needed:
 
 ## Document Revision History
 
+- **v1.4** - Updated documentation to match implemented firmware:
+  - Corrected state machine: 3 states (OFF/WHITE/WARM), not 4
+  - Replaced pseudo-code with module architecture explanations
+  - Added battery state machine documentation (NORMAL/LOW/CRITICAL/CUTOFF with hysteresis)
+  - Updated state behaviours to reflect actual implementation (hold for brightness, not long-press for off)
+  - Updated testing checklist with completed items
 - **v1.3** - Fixed LED ghosting issue in deep sleep:
   - Added critical fix: `gpio_hold_en()` required to prevent GPIO leakage
   - Removed schemdraw schematic (use KiCAD for proper schematics instead)

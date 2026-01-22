@@ -16,14 +16,18 @@ LED desk lamp rebuild using salvaged LED assembly with new electronics. The orig
 .
 ├── firmware/          # PlatformIO project for ESP32-C3
 │   ├── src/
-│   │   ├── main.cpp         # Main entry point and callbacks
-│   │   ├── led_control.cpp  # LED state machine and brightness control
-│   │   └── touch_input.cpp  # Touch button debouncing and detection
+│   │   ├── main.cpp            # Main entry point and callbacks
+│   │   ├── led_control.cpp     # LED state machine and brightness control
+│   │   ├── touch_input.cpp     # Touch button debouncing and detection
+│   │   └── battery_monitor.cpp # Battery voltage monitoring and state machine
 │   ├── include/
-│   │   ├── config.h         # All configuration defines
-│   │   ├── led_control.h    # LED control interface
-│   │   └── touch_input.h    # Touch input interface
-│   └── platformio.ini       # Build configuration
+│   │   ├── config.h            # All configuration defines
+│   │   ├── led_control.h       # LED control interface
+│   │   ├── touch_input.h       # Touch input interface
+│   │   └── battery_monitor.h   # Battery monitoring interface
+│   ├── test/
+│   │   └── test_battery_state_machine.cpp  # Unit tests for battery state machine
+│   └── platformio.ini          # Build configuration
 ├── hardware/          # Hardware designs (to be added)
 ├── analysis/          # Power analysis and runtime prediction
 │   ├── analyze_runtime.py   # Runtime analysis script
@@ -97,6 +101,13 @@ The firmware is split into separate modules for maintainability:
 - Continuous brightness adjustment while holding
 - Direction reversal at brightness boundaries
 
+**battery_monitor module** - Battery voltage monitoring:
+- ADC reading with 8-sample averaging for stability
+- State machine with hysteresis (NORMAL → LOW → CRITICAL → CUTOFF)
+- Configurable voltage thresholds
+- Brightness limiting in CRITICAL state (50% max)
+- Visual low-battery warnings via LED flashing
+
 **main.cpp** - Setup, loop, and callbacks:
 - WiFi/Bluetooth disabled for power savings
 - Deep sleep after 60s in OFF state
@@ -114,7 +125,7 @@ The lamp operates in three states with touch-based cycling:
 ### Current Implementation Status
 
 **Fully Implemented:**
-- ✅ Modular code structure (config, led_control, touch_input, main)
+- ✅ Modular code structure (config, led_control, touch_input, battery_monitor, main)
 - ✅ Touch input debouncing (50ms) and long press detection (800ms)
 - ✅ State machine (OFF/WHITE/WARM with smooth transitions)
 - ✅ Continuous gamma-corrected brightness control (not discrete steps)
@@ -126,16 +137,17 @@ The lamp operates in three states with touch-based cycling:
 - ✅ Wake from deep sleep on touch (goes directly to WHITE)
 - ✅ WiFi and Bluetooth disabled for power savings
 - ✅ Debug output with compile-time control (DEBUG flag)
+- ✅ Battery voltage monitoring with ADC calibration
+- ✅ Battery state machine with hysteresis (NORMAL/LOW/CRITICAL/CUTOFF)
+- ✅ Low-battery warnings (flash on wake when LOW, flash on every mode change when CRITICAL)
+- ✅ Brightness limiting in CRITICAL state (50% max)
+- ✅ Hard cutoff protection (refuses to turn on below 3.0V)
+- ✅ Unit tests for battery state machine (9 tests)
 
 **Known Issues & Fixes:**
 - ✅ **LED ghosting in OFF state**: PWM=0 may not guarantee 0V on GPIO
   - Fix: Detach PWM and force GPIO LOW when in OFF state
   - Re-attach PWM when transitioning from OFF to WHITE/WARM
-
-**TODO:**
-- Battery voltage monitoring on GPIO0
-- Low-battery warning (visual indication when < 3.5V)
-- Adjust MAX_BRIGHTNESS from 128 to 255 for full battery voltage operation
 
 ### Brightness Control Implementation
 
@@ -178,22 +190,27 @@ The lamp operates in three states with touch-based cycling:
 
 **Voltage divider:** 100kΩ (high) + 33kΩ (low) = high impedance to minimize drain (~11µA @ 3.7V)
 
-**Critical thresholds:**
-- 4.2V - Fully charged
-- 3.7V - ~50% (nominal)
-- 3.5V - Low battery warning
-- 3.2V - Critical
-- 3.0V - Hard cutoff (protect battery)
+**State machine with hysteresis:** Prevents flickering between states due to voltage sag under load.
 
-**ADC configuration (when implemented):**
-```cpp
-// ESP32-C3 ADC setup for battery monitoring
-analogReadResolution(12);  // 12-bit ADC (0-4095)
-// Read from GPIO0 (ADC1_CH0)
-int adcValue = analogRead(BATTERY_PIN);
-float voltage = adcValue * (3.3 / 4095.0) * (133.0 / 33.0);  // Voltage divider compensation
-// Scaling factor: 4.030 (gives 1.042V at 4.2V battery)
-```
+| State | Voltage Range | Behavior |
+|-------|---------------|----------|
+| NORMAL | > 3.5V | Full operation |
+| LOW | 3.2V - 3.5V | Flash warning on wake only |
+| CRITICAL | 3.0V - 3.2V | Flash every mode change, brightness limited to 50% |
+| CUTOFF | < 3.0V | Refuse to turn on, enter deep sleep |
+
+**Hysteresis logic:**
+- NORMAL → LOW: Immediate at 3.5V
+- LOW → CRITICAL: Requires 3 consecutive readings below 3.2V (90 seconds)
+- CRITICAL → LOW: Requires voltage above 3.3V (100mV hysteresis)
+- CUTOFF → CRITICAL: Requires voltage above 3.2V (200mV hysteresis, typically charging)
+
+**ADC configuration:**
+- 12-bit resolution (0-4095)
+- 11dB attenuation for 0-3.3V range
+- 8-sample averaging for stability
+- Calibration factor (ADC_CALIBRATION_FACTOR) tuned to oscilloscope measurements
+- BMS voltage drop compensation (BMS_VOLTAGE_DROP) for TP4056 MOSFET
 
 ### Power Budget
 - **OFF (deep sleep):** ~22.5µA total → ~12 years standby (theoretical)
@@ -222,12 +239,18 @@ Key settings in `include/config.h`:
 #define WARM_LED_PIN 5
 #define BATTERY_PIN 0
 
+// Battery voltage calibration
+#define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading
+#define BMS_VOLTAGE_DROP 0.090        // TP4056 MOSFET voltage drop (~90mV)
+
 // Brightness (0-255)
 #define MAX_BRIGHTNESS 128           // Set to 255 for full battery operation
 #define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output (prevents completely off)
 #define GAMMA_CORRECTION 2.2         // Perceptual brightness curve
 
 // Timing (milliseconds)
+#define DEBOUNCE_MS 50               // Touch debounce time
+#define LONG_PRESS_MS 800            // Time to trigger long press
 #define BRIGHTNESS_INCREMENT_MS 30   // How fast brightness changes when holding
 #define MODE_TRANSITION_MS 400       // Crossfade duration between modes
 #define DEEP_SLEEP_TIMEOUT_MS 60000  // Time in OFF before deep sleep

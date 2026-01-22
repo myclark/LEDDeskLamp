@@ -1,5 +1,5 @@
 #include "touch_input.h"
-#include "led_control.h"  // For boundary detection
+#include "led_control.h"  // For brightness and brightnessDirection globals
 
 // Button state
 static bool lastState = false;

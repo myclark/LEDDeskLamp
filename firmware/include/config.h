@@ -36,8 +36,6 @@
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
 #define LONG_PRESS_MS 800
-#define BRIGHTNESS_STEP_MS 400          // Time between brightness steps when holding
-#define BRIGHTNESS_BOUNDARY_PAUSE_MS 1000  // Longer pause at min/max before reversing
 #define DEEP_SLEEP_TIMEOUT_MS 60000     // Enter deep sleep after 1 minute in OFF state
 
 #endif // CONFIG_H

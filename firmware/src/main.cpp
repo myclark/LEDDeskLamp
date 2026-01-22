@@ -29,7 +29,6 @@ void handleTap() {
     updateLED();
     delay(1000);  // Brief delay to show the debug message
     enterDeepSleep();
-    return;  // Won't reach here, but for clarity
   }
 
   // Advance state normally
