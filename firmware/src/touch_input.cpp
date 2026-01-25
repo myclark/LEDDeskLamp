@@ -54,11 +54,10 @@ void updateButton() {
           // It was a tap (released before long press threshold)
           if (onTap) onTap();
         } else {
-          // Released after long press - reverse direction if at boundary
-          if (brightness == 1 || brightness == MAX_BRIGHTNESS) {
-            brightnessDirection *= -1;  // Reverse for next hold
-            DEBUG_PRINTLN("At boundary - direction reversed for next hold");
-          }
+          // Released after long press - always reverse direction for next hold
+          // This creates a "binary search" UX: hold to dim, release, hold to brighten, etc.
+          brightnessDirection *= -1;
+          DEBUG_PRINTLN("Direction reversed for next hold");
         }
         brightnessStepMode = false;
         DEBUG_PRINTLN("Released");

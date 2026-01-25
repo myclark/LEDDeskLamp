@@ -16,6 +16,16 @@ uint8_t criticalConsecutiveCount = 0;  // Hysteresis counter for entering CRITIC
 #define BATTERY_CRITICAL_HYSTERESIS 3.3  // Return to LOW when above this (100mV hysteresis)
 #define BATTERY_CUTOFF_THRESHOLD 3.0
 
+// Brightness compensation reference voltage
+// At this voltage, PWM is used at full value; above this, PWM is scaled down
+#define BRIGHTNESS_REFERENCE_VOLTAGE 3.5
+
+// Programming mode detection
+// When voltage > 4.5V, we're on USB power (not battery)
+// Cap PWM to 50% for safety and consistent development experience
+#define PROGRAMMING_MODE_VOLTAGE 4.5
+#define PROGRAMMING_MODE_MAX_PWM 128
+
 // Voltage divider scaling: (100kΩ + 33kΩ) / 33kΩ = 4.030
 #define VOLTAGE_DIVIDER_RATIO 4.030
 
@@ -85,6 +95,39 @@ uint8_t getBatteryLimitedMaxBrightness() {
     return CRITICAL_MAX_BRIGHTNESS;
   }
   return MAX_BRIGHTNESS;  // From config.h
+}
+
+float calculateCompensationFactor(float voltage) {
+  // Compensate for voltage-dependent LED brightness
+  // At reference voltage (3.5V), factor = 1.0 (full PWM)
+  // At higher voltages, factor < 1.0 (reduced PWM to match brightness)
+  // At lower voltages, factor could be > 1.0, but we cap at 1.0
+
+  // Programming mode: USB power detected (voltage > 4.5V)
+  // Use fixed factor to cap PWM at 50% for safety
+  if (voltage > PROGRAMMING_MODE_VOLTAGE) {
+    return (float)PROGRAMMING_MODE_MAX_PWM / 255.0;
+  }
+
+  if (voltage <= BRIGHTNESS_REFERENCE_VOLTAGE) {
+    // At or below reference, use full PWM (can't compensate for low voltage)
+    return 1.0;
+  }
+
+  // Linear compensation: factor = reference / actual
+  float factor = BRIGHTNESS_REFERENCE_VOLTAGE / voltage;
+
+  // Clamp to valid range (shouldn't exceed 1.0 given the check above)
+  if (factor > 1.0) factor = 1.0;
+  if (factor < 0.5) factor = 0.5;  // Don't reduce below 50% (safety floor)
+
+  return factor;
+}
+
+float getBrightnessCompensationFactor() {
+  // Get compensation factor based on last battery reading
+  float voltage = lastBatteryVoltage + BMS_VOLTAGE_DROP;
+  return calculateCompensationFactor(voltage);
 }
 
 // State machine logic (extracted for testability)

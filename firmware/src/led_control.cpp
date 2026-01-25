@@ -1,8 +1,9 @@
 #include "led_control.h"
 #include "battery_monitor.h"
 
-// Forward declaration
+// Forward declarations
 static void flashBoundaryIndicator();
+static uint8_t getCompensatedPWM(uint8_t brightnessLevel);
 
 // LEDC channels for ESP32 PWM
 #define WHITE_LED_CHANNEL 0
@@ -67,8 +68,8 @@ void advanceState() {
 }
 
 void updateLED() {
-  // Get gamma-corrected PWM value for current brightness
-  uint8_t pwmValue = gammaLUT[brightness];
+  // Get gamma-corrected and voltage-compensated PWM value
+  uint8_t pwmValue = getCompensatedPWM(brightness);
 
   // If transitioning FROM OFF state, re-attach PWM pins
   static LampState previousState = OFF;
@@ -163,7 +164,8 @@ void incrementBrightness() {
   isTransitioning = false;
 
   // Directly update PWM (no transition for continuous brightness changes)
-  uint8_t pwmValue = gammaLUT[brightness];
+  // Apply voltage compensation for consistent perceived brightness
+  uint8_t pwmValue = getCompensatedPWM(brightness);
   if (currentLampState == WHITE) {
     currentWhitePWM = pwmValue;
     targetWhitePWM = pwmValue;
@@ -180,7 +182,7 @@ void incrementBrightness() {
 void flashBoundaryIndicator() {
   // Double flash to indicate min/max boundary (more deliberate than single flash)
   uint8_t activeLEDChannel = (currentLampState == WHITE) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
-  uint8_t currentPWM = gammaLUT[brightness];
+  uint8_t currentPWM = getCompensatedPWM(brightness);
 
   // First flash
   ledcWrite(activeLEDChannel, 0);
@@ -223,6 +225,24 @@ void calculateGammaLUT() {
   DEBUG_PRINT(gammaLUT[MAX_BRIGHTNESS / 2]);
   DEBUG_PRINT(", Max: ");
   DEBUG_PRINTLN(gammaLUT[MAX_BRIGHTNESS]);
+}
+
+static uint8_t getCompensatedPWM(uint8_t brightnessLevel) {
+  // Get base PWM from gamma LUT
+  uint8_t basePWM = gammaLUT[brightnessLevel];
+
+  // Apply battery voltage compensation
+  // At reference voltage (3.5V), no change
+  // At higher voltages, reduce PWM to maintain consistent perceived brightness
+  float factor = getBrightnessCompensationFactor();
+  uint8_t compensatedPWM = (uint8_t)(basePWM * factor);
+
+  // Enforce minimum PWM when not at zero (same as gamma LUT logic)
+  if (brightnessLevel > 0 && compensatedPWM < MIN_BRIGHTNESS_PWM) {
+    compensatedPWM = MIN_BRIGHTNESS_PWM;
+  }
+
+  return compensatedPWM;
 }
 
 void updateModeTransition() {
@@ -270,7 +290,7 @@ void flashLowBatteryWarning() {
   }
 
   uint8_t activeLEDChannel = (currentLampState == WHITE) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
-  uint8_t currentPWM = gammaLUT[brightness];
+  uint8_t currentPWM = getCompensatedPWM(brightness);
 
   // Save current transition state and cancel it
   bool wasTransitioning = isTransitioning;

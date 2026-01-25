@@ -32,6 +32,15 @@ float getLastBatteryVoltage();
 // Get effective max brightness based on battery state
 uint8_t getBatteryLimitedMaxBrightness();
 
+// Get brightness compensation factor for current battery voltage
+// Returns a factor (0.0 to 1.0) to scale PWM values
+// At reference voltage (3.5V), returns 1.0
+// At higher voltages, returns < 1.0 to maintain consistent perceived brightness
+float getBrightnessCompensationFactor();
+
+// For unit testing: Calculate compensation factor for a given voltage
+float calculateCompensationFactor(float voltage);
+
 // For unit testing: Update state machine with given voltage (bypasses timing)
 void updateBatteryStateMachine(float batteryVoltage);
 

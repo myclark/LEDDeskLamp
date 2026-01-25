@@ -170,6 +170,75 @@ void test_battery_limited_brightness(void) {
   TEST_ASSERT_EQUAL(MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
 }
 
+// Test: Brightness compensation factor at reference voltage (3.5V)
+void test_compensation_factor_at_reference(void) {
+  float factor = calculateCompensationFactor(3.5);
+  // At reference voltage, factor should be 1.0
+  TEST_ASSERT_FLOAT_WITHIN(0.001, 1.0, factor);
+}
+
+// Test: Brightness compensation factor at full charge (4.2V)
+void test_compensation_factor_at_full_charge(void) {
+  float factor = calculateCompensationFactor(4.2);
+  // At 4.2V, factor = 3.5/4.2 ≈ 0.833
+  float expected = 3.5 / 4.2;
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+}
+
+// Test: Brightness compensation factor below reference (should cap at 1.0)
+void test_compensation_factor_below_reference(void) {
+  // At 3.3V (below 3.5V), factor should be capped at 1.0
+  float factor = calculateCompensationFactor(3.3);
+  TEST_ASSERT_FLOAT_WITHIN(0.001, 1.0, factor);
+
+  // At 3.0V, still capped at 1.0
+  factor = calculateCompensationFactor(3.0);
+  TEST_ASSERT_FLOAT_WITHIN(0.001, 1.0, factor);
+}
+
+// Test: Compensation factor at upper normal range (just below programming mode)
+void test_compensation_factor_upper_normal_range(void) {
+  // At 4.5V (boundary), normal compensation applies
+  float factor = calculateCompensationFactor(4.5);
+  float expected = 3.5 / 4.5;  // ≈ 0.778
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+
+  // At 4.2V (full battery), normal compensation
+  factor = calculateCompensationFactor(4.2);
+  expected = 3.5 / 4.2;  // ≈ 0.833
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+}
+
+// Test: Programming mode detection (voltage > 4.5V = USB power)
+void test_compensation_factor_programming_mode(void) {
+  // At 5.0V (USB power), should use fixed factor for 50% max PWM
+  float factor = calculateCompensationFactor(5.0);
+  float expected = 128.0 / 255.0;  // ≈ 0.502
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+
+  // At 5.16V (typical USB), same behavior
+  factor = calculateCompensationFactor(5.16);
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+
+  // At exactly 4.5V, should NOT trigger programming mode (use normal compensation)
+  factor = calculateCompensationFactor(4.5);
+  float normalExpected = 3.5 / 4.5;  // ≈ 0.778
+  TEST_ASSERT_FLOAT_WITHIN(0.001, normalExpected, factor);
+
+  // Just above 4.5V should trigger programming mode
+  factor = calculateCompensationFactor(4.51);
+  TEST_ASSERT_FLOAT_WITHIN(0.001, expected, factor);
+}
+
+// Test: getBrightnessCompensationFactor uses cached voltage
+void test_get_brightness_compensation_factor(void) {
+  // Set a known voltage (subtract BMS_VOLTAGE_DROP since getBrightnessCompensationFactor adds it back)
+  lastBatteryVoltage = 4.2 - BMS_VOLTAGE_DROP;
+  float factor = getBrightnessCompensationFactor();
+  float expected = 3.5 / 4.2;
+  TEST_ASSERT_FLOAT_WITHIN(0.01, expected, factor);
+}
+
 // Test: Full discharge scenario
 void test_full_discharge_scenario(void) {
   currentBatteryState = BATTERY_NORMAL;
@@ -213,6 +282,12 @@ int main(int argc, char **argv) {
   RUN_TEST(test_any_state_to_cutoff);
   RUN_TEST(test_cutoff_to_critical_recovery);
   RUN_TEST(test_battery_limited_brightness);
+  RUN_TEST(test_compensation_factor_at_reference);
+  RUN_TEST(test_compensation_factor_at_full_charge);
+  RUN_TEST(test_compensation_factor_below_reference);
+  RUN_TEST(test_compensation_factor_upper_normal_range);
+  RUN_TEST(test_compensation_factor_programming_mode);
+  RUN_TEST(test_get_brightness_compensation_factor);
   RUN_TEST(test_full_discharge_scenario);
 
   return UNITY_END();
@@ -230,6 +305,12 @@ void setup() {
   RUN_TEST(test_any_state_to_cutoff);
   RUN_TEST(test_cutoff_to_critical_recovery);
   RUN_TEST(test_battery_limited_brightness);
+  RUN_TEST(test_compensation_factor_at_reference);
+  RUN_TEST(test_compensation_factor_at_full_charge);
+  RUN_TEST(test_compensation_factor_below_reference);
+  RUN_TEST(test_compensation_factor_upper_normal_range);
+  RUN_TEST(test_compensation_factor_programming_mode);
+  RUN_TEST(test_get_brightness_compensation_factor);
   RUN_TEST(test_full_discharge_scenario);
 
   UNITY_END();

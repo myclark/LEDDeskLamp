@@ -25,7 +25,7 @@
 
 // Maximum brightness for testing (0-255)
 // Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
-#define MAX_BRIGHTNESS 128
+#define MAX_BRIGHTNESS 255
 #define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output value (prevents LED completely off)
 
 // Brightness configuration

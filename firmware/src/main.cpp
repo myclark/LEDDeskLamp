@@ -58,8 +58,10 @@ void handleLongPress() {
 }
 
 void setup() {
+#if DEBUG
   Serial.begin(115200);
   delay(100);  // Brief delay for USB CDC to enumerate
+#endif
 
   // Disable WiFi and Bluetooth to save power
   WiFi.mode(WIFI_OFF);
