@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(pio test:*)",
-      "Bash(pio run:*)"
+      "Bash(pio run:*)",
+      "mcp__sequential-thinking__sequentialthinking"
     ]
   }
 }

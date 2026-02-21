@@ -19,7 +19,7 @@ SerialClass Serial;
 #include "config.h"
 
 // Include battery monitor implementation directly for testing
-#include "../src/battery_monitor.cpp"
+#include "../../src/battery_monitor.cpp"
 
 // Mock voltage for testing
 void setBatteryVoltage(float voltage) {

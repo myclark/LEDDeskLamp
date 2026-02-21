@@ -90,16 +90,20 @@ The firmware is split into separate modules for maintainability:
 - Debug output control (DEBUG flag)
 
 **led_control module** - LED state machine and brightness:
-- Continuous gamma-corrected brightness (0-128 range with LUT)
-- Smooth crossfade transitions between modes (400ms)
+- OFF/ON state model with MODE_WARM/MODE_COOL selector
+- Per-mode brightness memory
+- Smooth crossfade transitions (400ms) between modes and on mode swap
 - ESP32 LEDC hardware PWM control (5kHz, 8-bit)
 - Boundary detection with double-flash feedback
+- Non-blocking battery indicator pulse animation (sine-envelope, configurable sharpness)
 
 **touch_input module** - Capacitive touch handling:
 - 50ms debouncing
-- 800ms long press detection
-- Continuous brightness adjustment while holding
-- Direction reversal at brightness boundaries
+- Multi-tap gesture detection: single, double, triple tap (300ms window)
+- 800ms long press with start/hold/end callbacks
+- Continuous brightness adjustment every 30ms while held
+- Direction reversal on long press release
+- Touch blocking during battery indicator animation
 
 **battery_monitor module** - Battery voltage monitoring:
 - ADC reading with 8-sample averaging for stability
@@ -109,37 +113,48 @@ The firmware is split into separate modules for maintainability:
 - Visual low-battery warnings via LED flashing
 
 **main.cpp** - Setup, loop, and callbacks:
+- RTC memory persistence (savedMode, warmBrightness, coolBrightness survive deep sleep)
 - WiFi/Bluetooth disabled for power savings
 - Deep sleep after 60s in OFF state
-- Wake from deep sleep via GPIO3 (touch)
+- Wake from deep sleep via GPIO3 (touch) — restores last mode and brightness
 - Minimal loop delay (1ms) for smooth transitions
 
 ### State Machine Design
 
-The lamp operates in three states with touch-based cycling:
-- **OFF** → **WHITE** → **WARM** → (back to OFF)
-- **Tap:** Cycle to next state with smooth crossfade
-- **Hold:** Continuously adjust brightness (gamma corrected)
-- **Boundary:** Double flash when reaching min/max brightness
+The lamp has two states (OFF / ON) with gesture-based control:
+
+| Gesture | When OFF | When ON |
+|---------|----------|---------|
+| Single tap | Turn on (restore last mode + brightness) | Turn off |
+| Double tap | Ignored | Swap WARM ↔ COOL (with crossfade) |
+| Long press | Ignored | Adjust brightness (per-mode, direction reverses on release) |
+| Triple tap | Ignored | Show battery level pulse indicator |
+
+- On wake from deep sleep: treated as single tap (turn on, restore last state)
+- Auto battery indicator plays after turn-on when battery is LOW or CRITICAL
 
 ### Current Implementation Status
 
 **Fully Implemented:**
 - ✅ Modular code structure (config, led_control, touch_input, battery_monitor, main)
 - ✅ Touch input debouncing (50ms) and long press detection (800ms)
-- ✅ State machine (OFF/WHITE/WARM with smooth transitions)
+- ✅ Multi-tap gesture detection (single/double/triple tap with 300ms window)
+- ✅ State machine (OFF/ON with MODE_WARM/MODE_COOL selector)
 - ✅ Continuous gamma-corrected brightness control (not discrete steps)
-- ✅ Smooth crossfade transitions between modes (400ms)
+- ✅ Per-mode brightness memory (WARM and COOL each remember their own level)
+- ✅ Smooth crossfade transitions on tap and mode swap (400ms)
 - ✅ ESP32 LEDC PWM control for flicker-free dimming
 - ✅ Minimum brightness enforcement (never fully off when in ON state)
 - ✅ Boundary detection with double-flash feedback
 - ✅ Deep sleep mode after 60s in OFF state (~26µA)
-- ✅ Wake from deep sleep on touch (goes directly to WHITE)
+- ✅ Wake from deep sleep on touch (restores last mode + brightness via RTC memory)
 - ✅ WiFi and Bluetooth disabled for power savings
 - ✅ Debug output with compile-time control (DEBUG flag)
 - ✅ Battery voltage monitoring with ADC calibration
 - ✅ Battery state machine with hysteresis (NORMAL/LOW/CRITICAL/CUTOFF)
-- ✅ Low-battery warnings (flash on wake when LOW, flash on every mode change when CRITICAL)
+- ✅ Non-blocking pulse battery indicator (sine envelope, sharpness encodes urgency)
+- ✅ Auto battery warning indicator on turn-on when LOW or CRITICAL
+- ✅ Manual battery indicator via triple tap (any battery level)
 - ✅ Brightness limiting in CRITICAL state (50% max)
 - ✅ Hard cutoff protection (refuses to turn on below 3.0V)
 - ✅ Unit tests for battery state machine (9 tests)
@@ -147,7 +162,7 @@ The lamp operates in three states with touch-based cycling:
 **Known Issues & Fixes:**
 - ✅ **LED ghosting in OFF state**: PWM=0 may not guarantee 0V on GPIO
   - Fix: Detach PWM and force GPIO LOW when in OFF state
-  - Re-attach PWM when transitioning from OFF to WHITE/WARM
+  - Re-attach PWM when transitioning from OFF to ON
 
 ### Brightness Control Implementation
 
@@ -251,13 +266,43 @@ Key settings in `include/config.h`:
 // Timing (milliseconds)
 #define DEBOUNCE_MS 50               // Touch debounce time
 #define LONG_PRESS_MS 800            // Time to trigger long press
-#define BRIGHTNESS_INCREMENT_MS 30   // How fast brightness changes when holding
+#define BRIGHTNESS_STEP_MS 30        // How fast brightness changes when holding
 #define MODE_TRANSITION_MS 400       // Crossfade duration between modes
 #define DEEP_SLEEP_TIMEOUT_MS 60000  // Time in OFF before deep sleep
+#define GESTURE_WINDOW_MS 300        // Max time between taps in a multi-tap sequence
+
+// LED modes
+#define MODE_WARM 0
+#define MODE_COOL 1
+
+// Battery indicator pulse (per state: count, period ms, sharpness)
+#define PULSE_MIN_BRIGHTNESS 64      // Minimum indicator brightness (~25%)
+#define PULSE_NORMAL_COUNT 3         // 3 slow pulses = full battery
+#define PULSE_NORMAL_PERIOD_MS 800
+#define PULSE_NORMAL_SHARPNESS 1.0
+#define PULSE_LOW_COUNT 2            // 2 medium pulses = low battery
+#define PULSE_LOW_PERIOD_MS 500
+#define PULSE_LOW_SHARPNESS 2.0
+#define PULSE_CRITICAL_COUNT 1       // 1 sharp pulse = critical
+#define PULSE_CRITICAL_PERIOD_MS 300
+#define PULSE_CRITICAL_SHARPNESS 5.0
 
 // Debug
 #define DEBUG 1                      // Set to 0 to disable all Serial output
 ```
+
+### RTC Memory Persistence
+
+Variables declared with `RTC_DATA_ATTR` survive deep sleep (lost on battery disconnect):
+
+```cpp
+RTC_DATA_ATTR uint8_t savedMode = MODE_WARM;   // Last active mode
+RTC_DATA_ATTR uint8_t warmBrightness = 128;    // Warm mode brightness (default 50%)
+RTC_DATA_ATTR uint8_t coolBrightness = 128;    // Cool mode brightness (default 50%)
+RTC_DATA_ATTR uint16_t bootCount = 0;          // Debug: increments each wake/reset
+```
+
+On wake: `savedMode` and the corresponding brightness are restored via `turnOn()`. On mode swap or brightness change: the relevant RTC variable is updated immediately. Defaults (WARM, 50% each) apply after battery disconnect.
 
 ## Reference Documentation
 

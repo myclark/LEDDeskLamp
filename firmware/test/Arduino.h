@@ -9,6 +9,10 @@
 
 typedef uint8_t byte;
 #define ADC_11db 0
+#define HIGH 1
+#define LOW  0
+#define INPUT  0
+#define OUTPUT 1
 
 class SerialClass {
 public:
@@ -21,7 +25,9 @@ extern SerialClass Serial;
 
 unsigned long millis();
 int analogRead(uint8_t pin);
+int digitalRead(uint8_t pin);
 void delay(unsigned long ms);
+void pinMode(uint8_t pin, uint8_t mode);
 void analogReadResolution(uint8_t bits);
 void analogSetAttenuation(uint8_t attenuation);
 

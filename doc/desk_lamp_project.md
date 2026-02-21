@@ -261,39 +261,35 @@ float voltage = adcValue * (3.3 / 4095.0) * (122.0 / 22.0);  // Scaling factor =
 
 ### Lamp States
 
-The lamp operates in three states with touch-based cycling:
+The lamp has two states (OFF / ON) with gesture-based multi-tap control:
 
 ```
-        ┌────────┐
-        │  OFF   │ ◄──────────────────────────────┐
-        │        │                                │
-        │ LEDs:  │                                │
-        │  Both  │                                │
-        │  off   │                                │
-        └────┬───┘                                │
-             │                                    │
-     Tap (touch)                                  │
-             │                                    │
-             ▼                                    │
-        ┌────────┐                                │
-        │ WHITE  │                                │
-        │        │                                │
-        │ LEDs:  │──── Hold: adjust brightness    │
-        │  White │     (gamma corrected)          │
-        │  on    │                                │
-        └────┬───┘                                │
-             │                                    │
-         Tap │                                    │
-             ▼                                    │
-        ┌────────┐                                │
-        │  WARM  │                                │
-        │        │                                │
-        │ LEDs:  │──── Hold: adjust brightness    │
-        │  Warm  │     (gamma corrected)          │
-        │  on    │                                │
-        └────┬───┘                                │
-             │                                    │
-         Tap └────────────────────────────────────┘
+                    ┌─────────────────────────────────┐
+                    │                                 │
+                    ▼                                 │
+              ┌───────────┐                          │
+              │    OFF    │                          │
+              │           │                          │
+              │ LEDs off  │                          │
+              │ (60s)     │                          │
+              │   ↓       │                          │
+              │ DEEP      │                          │
+              │ SLEEP     │                          │
+              └─────┬─────┘                          │
+                    │                                │
+         Single tap (or wake from sleep)             │
+                    │                                │
+                    ▼                                │
+        ┌─────────────────────┐                      │
+        │          ON         │                      │
+        │                     │                      │
+        │  Mode: WARM or COOL │──── Single tap ──────┘
+        │  (remembers last)   │
+        │                     │
+        │  Double tap → swap WARM↔COOL (crossfade)   │
+        │  Long press → adjust brightness            │
+        │  Triple tap → battery level indicator      │
+        └─────────────────────┘
 ```
 
 ### State Behaviours
@@ -304,14 +300,16 @@ The lamp operates in three states with touch-based cycling:
 - Wake on touch interrupt (GPIO3 HIGH)
 - Minimal power draw (~22.5µA in deep sleep)
 
-**ON States (WHITE / WARM):**
-- Single MOSFET enabled via hardware PWM (LEDC)
-- Smooth 400ms crossfade transition when changing modes
-- Tap to cycle to next state
-- Hold (>800ms) to adjust brightness continuously
-- Brightness uses gamma correction (LUT) for perceptual linearity
-- Double flash indicates brightness boundary reached
-- Direction reverses at min/max boundaries
+**ON State:**
+- Active mode is either WARM or COOL (hardware PWM via LEDC)
+- Restores last used mode and per-mode brightness (via RTC memory)
+- Single tap: turn off (smooth crossfade to 0)
+- Double tap: swap WARM↔COOL with crossfade to that mode's saved brightness
+- Long press (>800ms): adjust brightness continuously (gamma corrected, per-mode)
+  - Direction reverses on release for next hold
+  - Double flash at min/max boundary
+- Triple tap: play non-blocking battery level pulse indicator
+- Auto indicator on turn-on when battery is LOW or CRITICAL (touch blocked during playback)
 
 ### Battery State Machine
 
@@ -320,15 +318,23 @@ Battery monitoring runs in parallel with hysteresis to prevent state flickering:
 | State | Voltage | Behaviour |
 |-------|---------|-----------|
 | NORMAL | > 3.5V | Full operation |
-| LOW | 3.2V - 3.5V | Flash warning on wake from deep sleep |
-| CRITICAL | 3.0V - 3.2V | Flash every mode change, brightness limited to 50% |
+| LOW | 3.2V - 3.5V | Pulse indicator on turn-on (wake or tap from OFF) |
+| CRITICAL | 3.0V - 3.2V | Pulse indicator on every turn-on, brightness limited to 50% |
 | CUTOFF | < 3.0V | Refuse to turn on, enter deep sleep immediately |
 
 **Hysteresis:** Requires 3 consecutive readings (90 seconds) to enter CRITICAL, and voltage must rise 100-200mV to recover to a higher state.
 
-### Optional Future Features
-- **Memory:** Remember last used mode/brightness across power cycles
-- **Auto-off timer:** Sleep after X minutes of inactivity
+### Battery Indicator Pulse
+
+Replaces hard flashing with a smooth sine-envelope pulse. Pulse characteristics encode urgency:
+
+| Battery State | Pulse Count | Period | Sharpness |
+|---------------|-------------|--------|-----------|
+| NORMAL | 3 (slow) | 800ms | 1.0 (gentle sine) |
+| LOW | 2 (medium) | 500ms | 2.0 (moderate) |
+| CRITICAL | 1 (sharp) | 300ms | 5.0 (aggressive) |
+
+Plays on the currently active LED channel at the saved brightness (min 25%). Touch is blocked during playback and automatically unblocked when complete.
 
 ## Software Architecture
 
@@ -343,19 +349,21 @@ The firmware is organised into four modules plus main:
 - Battery calibration factors (ADC correction, BMS voltage drop)
 
 **led_control** - LED state machine and PWM:
-- Three states: OFF, WHITE, WARM
-- Gamma-corrected brightness using a 129-entry lookup table (γ = 2.2)
-- Smooth 400ms crossfade transitions using linear interpolation
+- Two states: OFF / ON with MODE_WARM or MODE_COOL selector
+- Per-mode brightness memory (each mode remembers its own level)
+- Gamma-corrected brightness using a lookup table (γ = 2.2)
+- Smooth 400ms crossfade transitions (turn on/off and mode swap)
 - ESP32 LEDC hardware PWM at 5kHz, 8-bit resolution
 - Boundary detection with double-flash feedback at min/max brightness
 - PWM detach and GPIO hold for clean OFF state (prevents LED ghosting)
+- Non-blocking battery indicator pulse animation (sine-envelope, configurable sharpness)
 
 **touch_input** - Capacitive touch handling:
 - 50ms debouncing for stable state detection
-- 800ms threshold for long press detection
-- Callback-based architecture (setTapCallback, setLongPressCallback)
-- Continuous brightness adjustment every 30ms while holding
-- Direction tracking with automatic reversal at boundaries
+- Multi-tap gesture accumulator with 300ms window (single/double/triple tap)
+- 800ms threshold for long press with start/hold/end callbacks
+- Continuous brightness step every 30ms while holding
+- Touch blocking API for use during indicator animation
 
 **battery_monitor** - Battery voltage monitoring:
 - 12-bit ADC with 11dB attenuation, 8-sample averaging
@@ -366,11 +374,12 @@ The firmware is organised into four modules plus main:
 - Reads every 30 seconds, displays every 60 seconds or on significant change
 
 **main.cpp** - Application entry point:
+- RTC memory persistence for savedMode, warmBrightness, coolBrightness, bootCount
 - WiFi and Bluetooth disabled on startup for power savings
-- Registers tap and long-press callbacks
+- Registers 6 callbacks: single tap, double tap, triple tap, long press start/hold/end
+- On wake: restores last mode + brightness, shows auto battery indicator if needed
 - Handles deep sleep entry after 60s in OFF state
 - GPIO hold enable/disable for clean sleep/wake transitions
-- Battery state checks on mode change with appropriate warnings
 
 ## Build Notes
 
@@ -396,8 +405,10 @@ The firmware is organised into four modules plus main:
   - **During deep sleep**: `gpio_hold_en()` keeps GPIOs LOW
 - [x] Measure standby current in OFF state (target ~22.5µA)
 - [x] Verify charging indication on TP4056
-- [x] Test all state transitions (OFF → WHITE → WARM → OFF)
-- [x] Verify low battery warning triggers correctly (LOW: flash on wake, CRITICAL: flash every mode change)
+- [x] Test all state transitions (single tap ON/OFF, double tap WARM↔COOL)
+- [x] Verify brightness persists per mode through deep sleep cycle
+- [x] Verify battery indicator plays on turn-on when LOW/CRITICAL
+- [x] Test triple tap battery indicator at all battery levels
 - [x] Test brightness adjustment (hold to dim, gamma correction, boundary detection)
 - [x] Unit tests pass (9 tests for battery state machine)
 - [ ] Measure runtime at different brightness levels
@@ -473,6 +484,12 @@ Even though wireless features aren't initially needed:
 
 ## Document Revision History
 
+- **v1.5** - Control scheme refactor (multi-tap gestures, RTC brightness memory, pulse indicator):
+  - Replaced OFF/WHITE/WARM cycle with OFF/ON + MODE_WARM/MODE_COOL selector
+  - Single tap toggles ON/OFF, double tap swaps mode, triple tap shows battery indicator
+  - Per-mode brightness memory persisted through deep sleep via RTC memory
+  - Non-blocking pulse battery indicator (sine envelope, sharpness encodes urgency)
+  - Updated state machine diagram, module descriptions, and testing checklist
 - **v1.4** - Updated documentation to match implemented firmware:
   - Corrected state machine: 3 states (OFF/WHITE/WARM), not 4
   - Replaced pseudo-code with module architecture explanations

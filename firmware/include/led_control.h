@@ -3,26 +3,37 @@
 
 #include <Arduino.h>
 #include "config.h"
+#include "battery_monitor.h"
 
-// Lamp states
-enum LampState {
-  OFF,
-  WHITE,
-  WARM
-};
+enum LampState { OFF, ON };
 
-// External state variables
 extern LampState currentLampState;
-extern uint8_t brightness;        // Continuous brightness (0 to MAX_BRIGHTNESS)
-extern int8_t brightnessDirection;
+extern uint8_t currentMode;           // MODE_WARM or MODE_COOL
+extern uint8_t brightness;            // 0 to MAX_BRIGHTNESS
+extern int8_t brightnessDirection;    // -1 or +1
 
-// Function declarations
 void initLED();
-void advanceState();
-void updateLED();
-void incrementBrightness();         // Continuous brightness control
+
+// Power control
+void turnOn(uint8_t mode, uint8_t brightnessLevel);
+void turnOff();
+
+// Mode swap with crossfade
+void swapMode(uint8_t newMode, uint8_t newBrightness);
+
+// Brightness
+void incrementBrightness();
+void reverseBrightnessDirection();
+uint8_t getActiveBrightness();
+
+// Smooth transition (call from loop)
+void updateModeTransition();
+
+// Battery indicator pulse (non-blocking)
+void playBatteryIndicator(BatteryState state);
+void updateBatteryIndicator();    // Call from loop
+bool isPlayingIndicator();
+
 void calculateGammaLUT();
-void updateModeTransition();        // Call from main loop for smooth mode transitions
-void flashLowBatteryWarning();      // Flash LEDs to indicate low battery
 
 #endif // LED_CONTROL_H

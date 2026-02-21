@@ -1,38 +1,70 @@
 #include "touch_input.h"
-#include "led_control.h"  // For brightness and brightnessDirection globals
 
-// Button state
-static bool lastState = false;
+// --- Callback pointers ---
+static void (*onSingleTap)() = nullptr;
+static void (*onDoubleTap)() = nullptr;
+static void (*onTripleTap)() = nullptr;
+static void (*onLongPressStart)() = nullptr;
+static void (*onLongPressHold)() = nullptr;
+static void (*onLongPressEnd)() = nullptr;
+
+// --- Debounce state ---
+static bool lastReading = false;
 static bool currentState = false;
+static unsigned long lastChangeTime = 0;
+
+// --- Gesture accumulator ---
+static uint8_t tapCount = 0;
+static unsigned long lastReleaseTime = 0;
+static bool gestureTimerActive = false;
+
+// --- Long press state ---
 static unsigned long pressStartTime = 0;
 static bool longPressFired = false;
-static unsigned long lastBrightnessChange = 0;
-static bool brightnessStepMode = false;
+static bool longPressHolding = false;
+static unsigned long lastBrightnessStep = 0;
 
-// Callback function pointers
-static void (*onTap)() = nullptr;
-static void (*onLongPress)() = nullptr;
+// --- Touch blocking ---
+static bool touchBlocked = false;
+
+static void fireGesture() {
+  if (tapCount == 1) {
+    if (onSingleTap) onSingleTap();
+  } else if (tapCount == 2) {
+    if (onDoubleTap) onDoubleTap();
+  } else {
+    if (onTripleTap) onTripleTap();
+  }
+  tapCount = 0;
+  gestureTimerActive = false;
+}
 
 void initTouch() {
   pinMode(TOUCH_PIN, INPUT);
   DEBUG_PRINTLN("Touch input initialized");
 }
 
-void setTapCallback(void (*callback)()) {
-  onTap = callback;
-}
-
-void setLongPressCallback(void (*callback)()) {
-  onLongPress = callback;
-}
+void setSingleTapCallback(void (*callback)()) { onSingleTap = callback; }
+void setDoubleTapCallback(void (*callback)()) { onDoubleTap = callback; }
+void setTripleTapCallback(void (*callback)()) { onTripleTap = callback; }
+void setLongPressStartCallback(void (*callback)()) { onLongPressStart = callback; }
+void setLongPressHoldCallback(void (*callback)()) { onLongPressHold = callback; }
+void setLongPressEndCallback(void (*callback)()) { onLongPressEnd = callback; }
+void setTouchBlocked(bool blocked) { touchBlocked = blocked; }
 
 void updateButton() {
+  // 1. Gesture timer check (runs even when blocked, to flush pending gestures)
+  if (gestureTimerActive && (millis() - lastReleaseTime >= GESTURE_WINDOW_MS)) {
+    fireGesture();
+  }
+
+  // 2. If blocked, return early
+  if (touchBlocked) return;
+
+  // 3. Debounce: accept state change only after DEBOUNCE_MS of stability
   bool reading = digitalRead(TOUCH_PIN) == HIGH;
 
-  // Debounce: only accept state change if stable
-  static unsigned long lastChangeTime = 0;
-
-  if (reading != lastState) {
+  if (reading != lastReading) {
     lastChangeTime = millis();
   }
 
@@ -46,42 +78,45 @@ void updateButton() {
         // Button just pressed
         pressStartTime = millis();
         longPressFired = false;
-        brightnessStepMode = false;
+        longPressHolding = false;
         DEBUG_PRINTLN("Press started");
       } else {
         // Button just released
-        if (!longPressFired) {
-          // It was a tap (released before long press threshold)
-          if (onTap) onTap();
+        if (longPressFired) {
+          if (onLongPressEnd) onLongPressEnd();
+          longPressHolding = false;
         } else {
-          // Released after long press - always reverse direction for next hold
-          // This creates a "binary search" UX: hold to dim, release, hold to brighten, etc.
-          brightnessDirection *= -1;
-          DEBUG_PRINTLN("Direction reversed for next hold");
+          // It was a tap - add to gesture accumulator
+          tapCount++;
+          if (tapCount > 3) tapCount = 3;  // Cap at triple
+          lastReleaseTime = millis();
+          gestureTimerActive = true;
         }
-        brightnessStepMode = false;
         DEBUG_PRINTLN("Released");
       }
     }
 
-    // Check for long press while held
+    // Check for long press threshold while held
     if (currentState && !longPressFired) {
       if ((millis() - pressStartTime) >= LONG_PRESS_MS) {
         longPressFired = true;
-        brightnessStepMode = true;
-        lastBrightnessChange = millis();
-        if (onLongPress) onLongPress();
+        longPressHolding = true;
+        // Discard accumulated taps (edge case: tap-then-hold)
+        tapCount = 0;
+        gestureTimerActive = false;
+        lastBrightnessStep = millis();
+        if (onLongPressStart) onLongPressStart();
       }
     }
 
-    // Continuously increment brightness while held (stops automatically at boundaries)
-    if (currentState && brightnessStepMode) {
-      if ((millis() - lastBrightnessChange) >= BRIGHTNESS_INCREMENT_MS) {
-        lastBrightnessChange = millis();
-        if (onLongPress) onLongPress();
+    // Fire hold callback periodically while in long press mode
+    if (currentState && longPressHolding) {
+      if ((millis() - lastBrightnessStep) >= BRIGHTNESS_STEP_MS) {
+        lastBrightnessStep = millis();
+        if (onLongPressHold) onLongPressHold();
       }
     }
   }
 
-  lastState = reading;
+  lastReading = reading;
 }
