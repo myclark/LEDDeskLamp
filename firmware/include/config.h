@@ -37,13 +37,51 @@
 #define DEBOUNCE_MS 50
 #define LONG_PRESS_MS 800
 #define DEEP_SLEEP_TIMEOUT_MS 60000     // Enter deep sleep after 1 minute in OFF state
+#define AUTO_OFF_ENABLED 1              // Set to 0 to disable auto-off
+#define AUTO_OFF_TIMEOUT_MS 14400000    // Auto-off after 4 hours with no interaction
+#define USB_CDC_INIT_DELAY_MS 100       // Delay for USB CDC enumeration on boot
 
 // Gesture detection
-#define GESTURE_WINDOW_MS      300   // Max time between taps in a multi-tap sequence
+#define GESTURE_WINDOW_MS 300   // Max time between taps in a multi-tap sequence
+
+// Boundary flash (double-flash feedback when brightness hits min/max)
+#define BOUNDARY_FLASH_STEP_MS 80   // Duration of each on/off step in the double flash
 
 // LED mode identifiers
 #define MODE_WARM 0
 #define MODE_COOL 1
+
+// ADC sampling
+#define ADC_SAMPLE_COUNT 8           // Number of ADC samples to average for battery voltage
+
+// Battery voltage thresholds (volts)
+#define BATTERY_FULL 4.2
+#define BATTERY_NOMINAL 3.7
+#define BATTERY_LOW_THRESHOLD 3.5
+#define BATTERY_CRITICAL_THRESHOLD 3.2
+#define BATTERY_CRITICAL_HYSTERESIS 3.3   // Must rise above this to return from CRITICAL to LOW
+#define BATTERY_CUTOFF_THRESHOLD 3.0
+#define BATTERY_CUTOFF_RECOVERY_HYSTERESIS 3.2  // Must rise above this to recover from CUTOFF
+
+// Battery monitoring timing
+#define BATTERY_READ_INTERVAL_MS 30000    // Read every 30 seconds (30s × 3 = 90s for critical)
+#define BATTERY_DISPLAY_INTERVAL_MS 60000 // Auto-display every 60 seconds
+
+// Battery state machine hysteresis
+#define CRITICAL_CONSECUTIVE_THRESHOLD 3  // Consecutive low readings before entering CRITICAL
+
+// Battery brightness limiting
+#define CRITICAL_MAX_BRIGHTNESS 64        // Max brightness in CRITICAL state (~25% of 255)
+
+// Voltage divider ratio: (100kΩ + 33kΩ) / 33kΩ = 4.030
+#define VOLTAGE_DIVIDER_RATIO 4.030
+
+// Brightness compensation reference: at this voltage PWM is used at full value
+#define BRIGHTNESS_REFERENCE_VOLTAGE 3.5
+
+// Programming mode: when voltage > this, we're on USB (not battery)
+#define PROGRAMMING_MODE_VOLTAGE 4.5
+#define PROGRAMMING_MODE_MAX_PWM 128  // Cap at 50% when on USB power
 
 // Battery indicator pulse configuration
 #define PULSE_MIN_BRIGHTNESS 64      // Minimum brightness for pulse indicator (~25% of 255)

@@ -8,36 +8,7 @@ unsigned long lastBatteryDisplayTime = 0;
 BatteryState currentBatteryState = BATTERY_NORMAL;
 uint8_t criticalConsecutiveCount = 0;  // Hysteresis counter for entering CRITICAL state
 
-// Voltage thresholds (volts)
-#define BATTERY_FULL 4.2
-#define BATTERY_NOMINAL 3.7
-#define BATTERY_LOW_THRESHOLD 3.5
-#define BATTERY_CRITICAL_THRESHOLD 3.2
-#define BATTERY_CRITICAL_HYSTERESIS 3.3  // Return to LOW when above this (100mV hysteresis)
-#define BATTERY_CUTOFF_THRESHOLD 3.0
-
-// Brightness compensation reference voltage
-// At this voltage, PWM is used at full value; above this, PWM is scaled down
-#define BRIGHTNESS_REFERENCE_VOLTAGE 3.5
-
-// Programming mode detection
-// When voltage > 4.5V, we're on USB power (not battery)
-// Cap PWM to 50% for safety and consistent development experience
-#define PROGRAMMING_MODE_VOLTAGE 4.5
-#define PROGRAMMING_MODE_MAX_PWM 128
-
-// Voltage divider scaling: (100kΩ + 33kΩ) / 33kΩ = 4.030
-#define VOLTAGE_DIVIDER_RATIO 4.030
-
-// Timing
-#define BATTERY_READ_INTERVAL_MS 30000   // Read every 30 seconds (30s × 3 = 90s for critical)
-#define BATTERY_DISPLAY_INTERVAL_MS 60000 // Auto-display every 60 seconds
-
-// Hysteresis
-#define CRITICAL_CONSECUTIVE_THRESHOLD 3  // Number of consecutive low readings before entering CRITICAL
-
-// Brightness limiting in CRITICAL state
-#define CRITICAL_MAX_BRIGHTNESS 64  // 50% of normal max (128)
+// All thresholds and constants are defined in config.h
 
 void initBatteryMonitor() {
   // Configure ADC resolution and attenuation
@@ -59,11 +30,11 @@ void initBatteryMonitor() {
 float readBatteryVoltage() {
   // Take multiple samples and average for stability
   int sum = 0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < ADC_SAMPLE_COUNT; i++) {
     sum += analogRead(BATTERY_PIN);
     delay(1);
   }
-  int adcValue = sum / 8;
+  int adcValue = sum / ADC_SAMPLE_COUNT;
 
   // Convert ADC value to voltage
   // ESP32-C3 ADC reference is 3.3V (typically)
@@ -189,7 +160,7 @@ void updateBatteryStateMachine(float batteryVoltage) {
 
       case BATTERY_CUTOFF:
         // Can only recover by charging above cutoff
-        if (batteryVoltage >= BATTERY_CUTOFF_THRESHOLD + 0.2) {  // 200mV hysteresis
+        if (batteryVoltage >= BATTERY_CUTOFF_RECOVERY_HYSTERESIS) {
           currentBatteryState = BATTERY_CRITICAL;
           criticalConsecutiveCount = 0;
           DEBUG_PRINTLN("State: CUTOFF → CRITICAL");

@@ -4,6 +4,17 @@
 #include <Arduino.h>
 #include "config.h"
 
+// Input provider abstraction — allows swapping TTP223 touch, button, or accelerometer
+// The reader function should return true when the input is "active" (pressed/detected).
+// Default: reads TOUCH_PIN HIGH (TTP223 behavior).
+typedef bool (*InputStateReader)(void);
+void registerInputReader(InputStateReader reader);
+
+// For event-based sensors (e.g. accelerometer tap interrupt): call injectInputEvent(true)
+// then injectInputEvent(false) after a short delay to simulate a press/release cycle.
+// This also automatically registers the injected-state reader.
+void injectInputEvent(bool pressed);
+
 void initTouch();
 void updateButton();
 

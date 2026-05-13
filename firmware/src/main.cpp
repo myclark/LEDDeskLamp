@@ -15,6 +15,9 @@ RTC_DATA_ATTR uint16_t bootCount = 0;
 // Forward declarations
 void enterDeepSleep();
 
+// Tracks last user interaction for auto-off timeout
+static unsigned long lastInteractionTime = 0;
+
 // Helper: pointer to the brightness variable for a given mode
 static uint8_t* getModeBrightness(uint8_t mode) {
   return (mode == MODE_WARM) ? &warmBrightness : &coolBrightness;
@@ -23,6 +26,7 @@ static uint8_t* getModeBrightness(uint8_t mode) {
 // Callback: single tap — toggle ON/OFF
 void handleSingleTap() {
   DEBUG_PRINTLN(">>> SINGLE TAP");
+  lastInteractionTime = millis();
 
   if (currentLampState == ON) {
     turnOff();
@@ -49,6 +53,7 @@ void handleSingleTap() {
 // Callback: double tap — swap warm/cool (ignored when OFF)
 void handleDoubleTap() {
   DEBUG_PRINTLN(">>> DOUBLE TAP");
+  lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
   savedMode = (savedMode == MODE_WARM) ? MODE_COOL : MODE_WARM;
@@ -58,6 +63,7 @@ void handleDoubleTap() {
 // Callback: triple tap — show battery level indicator (ignored when OFF)
 void handleTripleTap() {
   DEBUG_PRINTLN(">>> TRIPLE TAP");
+  lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
   readBatteryVoltage();
@@ -68,6 +74,7 @@ void handleTripleTap() {
 // Callback: long press initial trigger — first brightness increment
 void handleLongPressStart() {
   DEBUG_PRINTLN(">>> LONG PRESS START");
+  lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
   incrementBrightness();
@@ -76,6 +83,7 @@ void handleLongPressStart() {
 
 // Callback: long press hold — continuous brightness increments
 void handleLongPressHold() {
+  lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
   incrementBrightness();
@@ -91,7 +99,7 @@ void handleLongPressEnd() {
 void setup() {
 #if DEBUG
   Serial.begin(115200);
-  delay(100);  // Brief delay for USB CDC to enumerate
+  delay(USB_CDC_INIT_DELAY_MS);
 #endif
 
   // Disable WiFi and Bluetooth to save power
@@ -121,6 +129,7 @@ void setup() {
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     DEBUG_PRINTLN("Woke from deep sleep!");
+    lastInteractionTime = millis();
 
     // Disable GPIO hold to allow PWM control again
     gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
@@ -154,6 +163,11 @@ void setup() {
   DEBUG_PRINT("Deep sleep after ");
   DEBUG_PRINT(DEEP_SLEEP_TIMEOUT_MS / 1000);
   DEBUG_PRINTLN("s in OFF state");
+#if AUTO_OFF_ENABLED
+  DEBUG_PRINT("Auto-off after ");
+  DEBUG_PRINT(AUTO_OFF_TIMEOUT_MS / 60000);
+  DEBUG_PRINTLN("min with no interaction");
+#endif
 }
 
 void loop() {
@@ -169,6 +183,16 @@ void loop() {
     setTouchBlocked(false);
   }
   indicatorWasPlaying = indicatorNowPlaying;
+
+  // Auto-off: turn off after AUTO_OFF_TIMEOUT_MS of no user interaction
+#if AUTO_OFF_ENABLED
+  if (currentLampState == ON && !isPlayingIndicator()) {
+    if (millis() - lastInteractionTime >= AUTO_OFF_TIMEOUT_MS) {
+      DEBUG_PRINTLN("Auto-off: no interaction timeout");
+      turnOff();
+    }
+  }
+#endif
 
   // Deep sleep timer: only when OFF and no indicator playing
   static unsigned long offStateStartTime = 0;

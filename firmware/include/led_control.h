@@ -34,6 +34,9 @@ void playBatteryIndicator(BatteryState state);
 void updateBatteryIndicator();    // Call from loop
 bool isPlayingIndicator();
 
+// Boundary flash (non-blocking double-flash when brightness hits min/max)
+bool isBoundaryFlashing();
+
 void calculateGammaLUT();
 
 #endif // LED_CONTROL_H

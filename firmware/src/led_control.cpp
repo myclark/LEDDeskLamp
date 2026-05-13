@@ -7,7 +7,7 @@
 #endif
 
 // Forward declarations
-static void flashBoundaryIndicator();
+static void triggerBoundaryFlash();
 static uint8_t getCompensatedPWM(uint8_t brightnessLevel);
 
 // LEDC channels for ESP32 PWM
@@ -34,6 +34,13 @@ static float startWhitePWM   = 0.0;
 static float startWarmPWM    = 0.0;
 static unsigned long transitionStartTime = 0;
 static bool isTransitioning = false;
+
+// Boundary flash state (non-blocking double-flash at brightness limits)
+static bool boundaryFlashActive = false;
+static uint8_t boundaryFlashStep = 0;
+static unsigned long boundaryFlashTimer = 0;
+static uint8_t boundaryFlashPWM = 0;
+static uint8_t boundaryFlashChannel = 0;
 
 // Battery indicator state
 static bool indicatorPlaying = false;
@@ -144,13 +151,13 @@ void incrementBrightness() {
     brightness = effectiveMaxBrightness;
     if (oldBrightness != effectiveMaxBrightness) {
       DEBUG_PRINTLN("(Reached MAX - release and hold again to dim)");
-      flashBoundaryIndicator();
+      triggerBoundaryFlash();
     }
   } else if (newBrightness <= 1) {
     brightness = 1;
     if (oldBrightness != 1) {
       DEBUG_PRINTLN("(Reached MIN - release and hold again to brighten)");
-      flashBoundaryIndicator();
+      triggerBoundaryFlash();
     }
   } else {
     brightness = (uint8_t)newBrightness;
@@ -163,6 +170,9 @@ void incrementBrightness() {
     DEBUG_PRINT(effectiveMaxBrightness);
     DEBUG_PRINTLN(" (battery CRITICAL)");
   }
+
+  // Skip direct PWM update while boundary flash is animating
+  if (boundaryFlashActive) return;
 
   // Cancel any ongoing mode transition, update PWM directly
   isTransitioning = false;
@@ -194,20 +204,17 @@ uint8_t getActiveBrightness() {
   return brightness;
 }
 
-static void flashBoundaryIndicator() {
-  uint8_t activeLEDChannel = (currentMode == MODE_COOL) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
-  uint8_t currentPWM = getCompensatedPWM(brightness);
+static void triggerBoundaryFlash() {
+  boundaryFlashChannel = (currentMode == MODE_COOL) ? WHITE_LED_CHANNEL : WARM_LED_CHANNEL;
+  boundaryFlashPWM = getCompensatedPWM(brightness);
+  boundaryFlashStep = 0;
+  boundaryFlashTimer = millis();
+  boundaryFlashActive = true;
+  ledcWrite(boundaryFlashChannel, 0);  // Begin with LED off
+}
 
-  // First flash
-  ledcWrite(activeLEDChannel, 0);
-  delay(80);
-  ledcWrite(activeLEDChannel, currentPWM);
-  delay(80);
-
-  // Second flash
-  ledcWrite(activeLEDChannel, 0);
-  delay(80);
-  ledcWrite(activeLEDChannel, currentPWM);
+bool isBoundaryFlashing() {
+  return boundaryFlashActive;
 }
 
 void calculateGammaLUT() {
@@ -248,6 +255,32 @@ static uint8_t getCompensatedPWM(uint8_t brightnessLevel) {
 }
 
 void updateModeTransition() {
+  // Boundary flash state machine: off→on→off→on over 4 × BOUNDARY_FLASH_STEP_MS
+  if (boundaryFlashActive) {
+    if (millis() - boundaryFlashTimer >= BOUNDARY_FLASH_STEP_MS) {
+      boundaryFlashTimer = millis();
+      boundaryFlashStep++;
+      if (boundaryFlashStep > 3) {
+        boundaryFlashActive = false;
+        // Restore lamp brightness and sync internal state
+        isTransitioning = false;
+        uint8_t pwm = getCompensatedPWM(brightness);
+        if (currentMode == MODE_COOL) {
+          currentWhitePWM = pwm; targetWhitePWM = pwm;
+          currentWarmPWM  = 0;   targetWarmPWM  = 0;
+        } else {
+          currentWarmPWM  = pwm; targetWarmPWM  = pwm;
+          currentWhitePWM = 0;   targetWhitePWM = 0;
+        }
+        ledcWrite(boundaryFlashChannel, pwm);
+      } else {
+        // Odd steps: on; even steps: off
+        ledcWrite(boundaryFlashChannel, (boundaryFlashStep % 2 == 1) ? boundaryFlashPWM : 0);
+      }
+    }
+    return;  // Don't run mode transition while flashing
+  }
+
   if (!isTransitioning) return;
 
   unsigned long elapsed = millis() - transitionStartTime;
@@ -266,7 +299,7 @@ void updateModeTransition() {
 
   // When transition to OFF completes, detach PWM and force GPIO LOW
   if (!isTransitioning && currentLampState == OFF) {
-    if (currentWhitePWM == 0 && currentWarmPWM == 0) {
+    if (currentWhitePWM < 0.1f && currentWarmPWM < 0.1f) {
       ledcDetachPin(WHITE_LED_PIN);
       ledcDetachPin(WARM_LED_PIN);
       pinMode(WHITE_LED_PIN, OUTPUT);

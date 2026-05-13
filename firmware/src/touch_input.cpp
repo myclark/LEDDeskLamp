@@ -27,6 +27,19 @@ static unsigned long lastBrightnessStep = 0;
 // --- Touch blocking ---
 static bool touchBlocked = false;
 
+// --- Input provider ---
+static volatile bool injectedState = false;
+static bool defaultTTP223Reader() { return digitalRead(TOUCH_PIN) == HIGH; }
+static bool injectedInputReader() { return injectedState; }
+static InputStateReader inputReader = defaultTTP223Reader;
+
+void registerInputReader(InputStateReader reader) { inputReader = reader; }
+
+void injectInputEvent(bool pressed) {
+  injectedState = pressed;
+  inputReader = injectedInputReader;
+}
+
 static void fireGesture() {
   if (tapCount == 1) {
     if (onSingleTap) onSingleTap();
@@ -41,6 +54,7 @@ static void fireGesture() {
 
 void initTouch() {
   pinMode(TOUCH_PIN, INPUT);
+  inputReader = defaultTTP223Reader;
   DEBUG_PRINTLN("Touch input initialized");
 }
 
@@ -62,7 +76,7 @@ void updateButton() {
   if (touchBlocked) return;
 
   // 3. Debounce: accept state change only after DEBOUNCE_MS of stability
-  bool reading = digitalRead(TOUCH_PIN) == HIGH;
+  bool reading = inputReader();
 
   if (reading != lastReading) {
     lastChangeTime = millis();
