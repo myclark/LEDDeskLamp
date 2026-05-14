@@ -3,7 +3,7 @@
 
 // Debug output control
 // Set to 1 to enable debug prints, 0 to disable
-#define DEBUG 1
+#define DEBUG 0
 
 #if DEBUG
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -107,7 +107,7 @@
 #define PULSE_CRITICAL_SHARPNESS 5.0
 
 // Default brightness on first power-up (RTC memory cleared)
-#define DEFAULT_BRIGHTNESS 128
+#define DEFAULT_BRIGHTNESS 255
 
 // ── Input mode selection ───────────────────────────────────────────────────
 // Define USE_ACCEL_INPUT to use LIS3DH tap detection instead of TTP223.
@@ -122,15 +122,15 @@
                                     // discrimination is done in firmware, not hardware, because
                                     // ring-down from a physical tap falls within the hardware
                                     // double-tap window and makes every tap look like a Dclick.
-#define LIS3DH_CLICK_THS     0x10   // ~256 mg threshold
+#define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
-#define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window (physical enclosures ring longer)
+#define LIS3DH_TIME_LIMIT    0x06   // 60 ms max tap impulse window — filters slow movement transients
 #define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap
 #define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window
 // After first Sclick, ignore INT1 for this long to suppress ring-down re-triggers,
 // then open a window to watch for a deliberate second tap.
 #define LIS3DH_RING_SUPPRESS_MS   300   // Dead time after first tap (covers ring-down)
-#define LIS3DH_SECOND_TAP_MS      250   // Window after ring-down to catch second tap
+#define LIS3DH_SECOND_TAP_MS      200   // Window after ring-down to catch second tap
 // Post-dispatch cooldown before re-arming (prevents double-dispatch from same event)
 #define LIS3DH_COOLDOWN_MS        300
 
