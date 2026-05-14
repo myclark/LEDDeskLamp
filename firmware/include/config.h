@@ -7,10 +7,14 @@
 
 #if DEBUG
   #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINT2(x, fmt) Serial.print(x, fmt)
   #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTLN2(x, fmt) Serial.println(x, fmt)
 #else
   #define DEBUG_PRINT(x)
+  #define DEBUG_PRINT2(x, fmt)
   #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTLN2(x, fmt)
 #endif
 
 // Pin definitions
@@ -114,13 +118,20 @@
 // Only relevant when USE_ACCEL_INPUT is defined.
 #define LIS3DH_I2C_ADDR      0x19   // Default; 0x18 if address jumper bridged
 
-#define LIS3DH_CLICK_CFG     0x30   // Z-axis single + double tap enable
-#define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold (tune down if taps missed)
+#define LIS3DH_CLICK_CFG     0x15   // Single-tap only, all axes (ZS+YS+XS). Double-tap
+                                    // discrimination is done in firmware, not hardware, because
+                                    // ring-down from a physical tap falls within the hardware
+                                    // double-tap window and makes every tap look like a Dclick.
+#define LIS3DH_CLICK_THS     0x10   // ~256 mg threshold
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
-#define LIS3DH_TIME_LIMIT    0x08   // 80 ms max tap impulse window
+#define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window (physical enclosures ring longer)
 #define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap
 #define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window
-// Total wait before reading CLICK_SRC: TIME_LATENCY + TIME_WINDOW
-#define LIS3DH_DOUBLE_TAP_WAIT_MS  (160 + 240)
+// After first Sclick, ignore INT1 for this long to suppress ring-down re-triggers,
+// then open a window to watch for a deliberate second tap.
+#define LIS3DH_RING_SUPPRESS_MS   300   // Dead time after first tap (covers ring-down)
+#define LIS3DH_SECOND_TAP_MS      250   // Window after ring-down to catch second tap
+// Post-dispatch cooldown before re-arming (prevents double-dispatch from same event)
+#define LIS3DH_COOLDOWN_MS        300
 
 #endif // CONFIG_H

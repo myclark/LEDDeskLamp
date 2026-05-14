@@ -101,32 +101,69 @@ void handleLongPressEnd() {
 }
 
 #ifdef USE_ACCEL_INPUT
+static void debugClickSrc(uint8_t src) {
+  DEBUG_PRINT("ACCEL: CLICK_SRC=0x");
+  DEBUG_PRINT2(src, HEX);
+  DEBUG_PRINT(" [");
+  if (!src) { DEBUG_PRINTLN("empty]"); return; }
+  if (src & 0x40) DEBUG_PRINT("IA ");
+  if (src & 0x20) DEBUG_PRINT("Dclick ");
+  if (src & 0x10) DEBUG_PRINT("Sclick ");
+  if (src & 0x04) DEBUG_PRINT("Z");
+  if (src & 0x02) DEBUG_PRINT("Y");
+  if (src & 0x01) DEBUG_PRINT("X");
+  if (src & 0x07) DEBUG_PRINT(src & 0x08 ? "- " : "+ ");
+  DEBUG_PRINTLN("]");
+}
+
 // Non-blocking state machine: waits LIS3DH_DOUBLE_TAP_WAIT_MS after INT1 fires,
 // then reads CLICK_SRC to discriminate single vs double tap.
 static void updateAccelInput() {
-  enum AccelState { IDLE, WAITING };
+  // Hardware double-tap discrimination is disabled (CLICK_CFG single-tap only).
+  // We read CLICK_SRC immediately on each INT1, then do tap counting in firmware:
+  //   IDLE          → INT1 fires (Sclick) → RING_SUPPRESS
+  //   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS (covers ring-down) → SECOND_TAP
+  //   SECOND_TAP    → INT1 fires again → double tap; or timeout → single tap
+  //   COOLDOWN      → wait LIS3DH_COOLDOWN_MS → IDLE
+  enum AccelState { IDLE, RING_SUPPRESS, SECOND_TAP, COOLDOWN };
   static AccelState state = IDLE;
-  static unsigned long intFiredAt = 0;
+  static unsigned long stateStart = 0;
 
   if (state == IDLE) {
     if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
-      DEBUG_PRINTLN("ACCEL: INT1 fired — waiting to discriminate tap");
-      intFiredAt = millis();
-      state = WAITING;
+      uint8_t src = accelReadClickSrc();
+      DEBUG_PRINT("ACCEL: tap detected: ");
+      debugClickSrc(src);
+      if ((src >> 4) & 0x01) {  // Sclick
+        stateStart = millis();
+        state = RING_SUPPRESS;
+      } else {
+        DEBUG_PRINTLN("ACCEL: no Sclick — ignoring");
+      }
+    }
+  } else if (state == RING_SUPPRESS) {
+    if (millis() - stateStart >= LIS3DH_RING_SUPPRESS_MS) {
+      DEBUG_PRINTLN("ACCEL: ring-down window passed — watching for second tap");
+      stateStart = millis();
+      state = SECOND_TAP;
+    }
+  } else if (state == SECOND_TAP) {
+    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
+      uint8_t src = accelReadClickSrc();
+      DEBUG_PRINT("ACCEL: second tap: ");
+      debugClickSrc(src);
+      DEBUG_PRINTLN("ACCEL: double tap → swap mode");
+      handleDoubleTap();
+      stateStart = millis();
+      state = COOLDOWN;
+    } else if (millis() - stateStart >= LIS3DH_SECOND_TAP_MS) {
+      DEBUG_PRINTLN("ACCEL: single tap → toggle on/off");
+      handleSingleTap();
+      stateStart = millis();
+      state = COOLDOWN;
     }
   } else {
-    if (millis() - intFiredAt >= LIS3DH_DOUBLE_TAP_WAIT_MS) {
-      uint8_t src = accelReadClickSrc();
-      DEBUG_PRINT("ACCEL: CLICK_SRC = 0x");
-      DEBUG_PRINTLN(src);
-      bool doubleTap = (src >> 5) & 0x01;
-      if (doubleTap) {
-        DEBUG_PRINTLN("ACCEL: double tap → swap mode");
-        handleDoubleTap();
-      } else {
-        DEBUG_PRINTLN("ACCEL: single tap → toggle on/off");
-        handleSingleTap();
-      }
+    if (millis() - stateStart >= LIS3DH_COOLDOWN_MS) {
       state = IDLE;
     }
   }
@@ -159,6 +196,7 @@ void setup() {
 #ifdef USE_ACCEL_INPUT
   Wire.begin(LIS3DH_SDA_PIN, LIS3DH_SCL_PIN);
   accelInit();
+  accelDumpConfig();
 #endif
 
   // Register callbacks
@@ -182,8 +220,8 @@ void setup() {
 #ifdef USE_ACCEL_INPUT
     // Clear latched INT1 — on wakeup any tap means "turn on", no discrimination needed
     uint8_t wakeSrc = accelReadClickSrc();
-    DEBUG_PRINT("ACCEL: wakeup CLICK_SRC = 0x");
-    DEBUG_PRINTLN(wakeSrc);
+    DEBUG_PRINT("ACCEL: wakeup ");
+    debugClickSrc(wakeSrc);
 #endif
 
     // Restore saved mode and brightness
