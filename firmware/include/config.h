@@ -3,7 +3,7 @@
 
 // Debug output control
 // Set to 1 to enable debug prints, 0 to disable
-#define DEBUG 0
+#define DEBUG 1
 
 #if DEBUG
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -14,10 +14,13 @@
 #endif
 
 // Pin definitions
-#define TOUCH_PIN 3
+#define TOUCH_PIN 3         // Note this can also be reused as a interrupt pin
 #define WHITE_LED_PIN 10    // White LED control (PWM)
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
 #define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
+#define LIS3DH_SDA_PIN 8    // LIS3DH I2C data
+#define LIS3DH_SCL_PIN 9    // LIS3DH I2C clock (GPIO9 is a strapping pin, but open-drain I2C is safe after reset)
+#define LIS3DH_INT_PIN 3    // LIS3DH INT1 — reuses same GPIO as TOUCH_PIN
 
 // Battery voltage calibration
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
@@ -98,5 +101,26 @@
 #define PULSE_CRITICAL_COUNT 1
 #define PULSE_CRITICAL_PERIOD_MS 300
 #define PULSE_CRITICAL_SHARPNESS 5.0
+
+// Default brightness on first power-up (RTC memory cleared)
+#define DEFAULT_BRIGHTNESS 128
+
+// ── Input mode selection ───────────────────────────────────────────────────
+// Define USE_ACCEL_INPUT to use LIS3DH tap detection instead of TTP223.
+// Comment out to revert to capacitive touch (touch_input gesture engine).
+#define USE_ACCEL_INPUT
+
+// ── LIS3DH tap-detection accelerometer ────────────────────────────────────
+// Only relevant when USE_ACCEL_INPUT is defined.
+#define LIS3DH_I2C_ADDR      0x19   // Default; 0x18 if address jumper bridged
+
+#define LIS3DH_CLICK_CFG     0x30   // Z-axis single + double tap enable
+#define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold (tune down if taps missed)
+#define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
+#define LIS3DH_TIME_LIMIT    0x08   // 80 ms max tap impulse window
+#define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap
+#define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window
+// Total wait before reading CLICK_SRC: TIME_LATENCY + TIME_WINDOW
+#define LIS3DH_DOUBLE_TAP_WAIT_MS  (160 + 240)
 
 #endif // CONFIG_H

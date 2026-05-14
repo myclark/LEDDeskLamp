@@ -5,11 +5,15 @@
 #include "led_control.h"
 #include "touch_input.h"
 #include "battery_monitor.h"
+#ifdef USE_ACCEL_INPUT
+#include <Wire.h>
+#include "accel_input.h"
+#endif
 
 // RTC-persistent variables (survive deep sleep, lost on battery disconnect)
 RTC_DATA_ATTR uint8_t savedMode = MODE_WARM;
-RTC_DATA_ATTR uint8_t warmBrightness = 128;
-RTC_DATA_ATTR uint8_t coolBrightness = 128;
+RTC_DATA_ATTR uint8_t warmBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint8_t coolBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t bootCount = 0;
 
 // Forward declarations
@@ -96,6 +100,39 @@ void handleLongPressEnd() {
   reverseBrightnessDirection();
 }
 
+#ifdef USE_ACCEL_INPUT
+// Non-blocking state machine: waits LIS3DH_DOUBLE_TAP_WAIT_MS after INT1 fires,
+// then reads CLICK_SRC to discriminate single vs double tap.
+static void updateAccelInput() {
+  enum AccelState { IDLE, WAITING };
+  static AccelState state = IDLE;
+  static unsigned long intFiredAt = 0;
+
+  if (state == IDLE) {
+    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
+      DEBUG_PRINTLN("ACCEL: INT1 fired — waiting to discriminate tap");
+      intFiredAt = millis();
+      state = WAITING;
+    }
+  } else {
+    if (millis() - intFiredAt >= LIS3DH_DOUBLE_TAP_WAIT_MS) {
+      uint8_t src = accelReadClickSrc();
+      DEBUG_PRINT("ACCEL: CLICK_SRC = 0x");
+      DEBUG_PRINTLN(src);
+      bool doubleTap = (src >> 5) & 0x01;
+      if (doubleTap) {
+        DEBUG_PRINTLN("ACCEL: double tap → swap mode");
+        handleDoubleTap();
+      } else {
+        DEBUG_PRINTLN("ACCEL: single tap → toggle on/off");
+        handleSingleTap();
+      }
+      state = IDLE;
+    }
+  }
+}
+#endif
+
 void setup() {
 #if DEBUG
   Serial.begin(115200);
@@ -119,13 +156,20 @@ void setup() {
   initLED();
   initBatteryMonitor();
 
+#ifdef USE_ACCEL_INPUT
+  Wire.begin(LIS3DH_SDA_PIN, LIS3DH_SCL_PIN);
+  accelInit();
+#endif
+
   // Register callbacks
   setSingleTapCallback(handleSingleTap);
   setDoubleTapCallback(handleDoubleTap);
   setTripleTapCallback(handleTripleTap);
+#ifndef USE_ACCEL_INPUT
   setLongPressStartCallback(handleLongPressStart);
   setLongPressHoldCallback(handleLongPressHold);
   setLongPressEndCallback(handleLongPressEnd);
+#endif
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     DEBUG_PRINTLN("Woke from deep sleep!");
@@ -134,6 +178,13 @@ void setup() {
     // Disable GPIO hold to allow PWM control again
     gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
     gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
+
+#ifdef USE_ACCEL_INPUT
+    // Clear latched INT1 — on wakeup any tap means "turn on", no discrimination needed
+    uint8_t wakeSrc = accelReadClickSrc();
+    DEBUG_PRINT("ACCEL: wakeup CLICK_SRC = 0x");
+    DEBUG_PRINTLN(wakeSrc);
+#endif
 
     // Restore saved mode and brightness
     turnOn(savedMode, *getModeBrightness(savedMode));
@@ -171,7 +222,11 @@ void setup() {
 }
 
 void loop() {
+#ifdef USE_ACCEL_INPUT
+  updateAccelInput();
+#else
   updateButton();
+#endif
   updateModeTransition();
   updateBatteryMonitor();
   updateBatteryIndicator();
