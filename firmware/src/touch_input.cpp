@@ -29,9 +29,9 @@ static bool touchBlocked = false;
 
 // --- Input provider ---
 static volatile bool injectedState = false;
-static bool defaultTTP223Reader() { return digitalRead(TOUCH_PIN) == HIGH; }
+static bool defaultButtonReader() { return digitalRead(BUTTON_PIN) == HIGH; }
 static bool injectedInputReader() { return injectedState; }
-static InputStateReader inputReader = defaultTTP223Reader;
+static InputStateReader inputReader = defaultButtonReader;
 
 void registerInputReader(InputStateReader reader) { inputReader = reader; }
 
@@ -53,9 +53,9 @@ static void fireGesture() {
 }
 
 void initTouch() {
-  pinMode(TOUCH_PIN, INPUT);
-  inputReader = defaultTTP223Reader;
-  DEBUG_PRINTLN("Touch input initialized");
+  pinMode(BUTTON_PIN, INPUT);
+  inputReader = defaultButtonReader;
+  DEBUG_PRINTLN("Button input initialized");
 }
 
 void setSingleTapCallback(void (*callback)()) { onSingleTap = callback; }

@@ -18,6 +18,13 @@ void initLED();
 void turnOn(uint8_t mode, uint8_t brightnessLevel);
 void turnOff();
 
+// Turns on at brightness 0 with no crossfade — for callers that immediately follow with
+// setBrightnessTarget() to ramp up via updateBrightnessSlew() instead (potentiometer
+// on-transition; see the USE_POT_INPUT comment in config.h: turning on is meant to be
+// "eased with BRIGHTNESS_SLEW_TIME_CONSTANT_MS", the same easing already used for live
+// pot tracking, not the fixed-duration mode-transition crossfade turnOn() uses).
+void turnOnAtZero(uint8_t mode);
+
 // Mode swap with crossfade
 void swapMode(uint8_t newMode, uint8_t newBrightness);
 
@@ -28,6 +35,13 @@ uint8_t getActiveBrightness();
 
 // Smooth transition (call from loop)
 void updateModeTransition();
+
+// Continuous brightness tracking (potentiometer input). setBrightnessTarget() records the
+// desired brightness; updateBrightnessSlew() (call every loop) eases the live brightness
+// and PWM output toward that target with exponential smoothing, so fast pot movements
+// produce a smooth, slightly lagging ramp instead of an instant jump.
+void setBrightnessTarget(uint8_t target);
+void updateBrightnessSlew();
 
 // Battery indicator pulse (non-blocking)
 void playBatteryIndicator(BatteryState state);

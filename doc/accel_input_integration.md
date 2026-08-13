@@ -1,8 +1,17 @@
 # LIS3DH Tap Input — Integration Notes
 
-Replaces the TTP223 capacitive touch module. The LIS3DH (SparkFun SEN-13963) detects
-physical taps on the lamp body via its hardware click-detection engine, with a single
-interrupt line waking the ESP32-C3 from deep sleep.
+Auxiliary input alongside the primary on/off + brightness control — a potentiometer or a
+physical button, selected by `USE_POT_INPUT` (see `doc/firmware_architecture.md`). The
+LIS3DH (SparkFun SEN-13963) detects physical taps on the lamp body via its hardware
+click-detection engine and is used to trigger the mode-swap gesture (WARM ↔ COOL) in both
+modes. It never controls power state directly, but its role as a deep-sleep **wake** source
+depends on which mode is active:
+
+- **Pot mode:** the accelerometer *is* the wake source — required, since there's no button
+  and the ESP32-C3 can't wake from an ADC threshold. `config.h` enforces this with a
+  `#error` if `USE_POT_INPUT` is defined without `USE_ACCEL_INPUT`.
+- **Button mode:** the button wakes the device; the accelerometer is not involved in wake
+  at all.
 
 ---
 
@@ -14,107 +23,87 @@ interrupt line waking the ESP32-C3 from deep sleep.
 | GND | GND | |
 | SDA | GPIO8 | I2C data (default ESP32-C3 I2C SDA) |
 | SCL | GPIO9 | I2C clock (default ESP32-C3 I2C SCL) |
-| I1 | GPIO3 | Interrupt + deep sleep wakeup (replaces TTP223 OUT) |
+| I1 | GPIO3 | Interrupt; also the deep-sleep wakeup pin in pot mode (not in button mode) |
 | I2 | — | Not used |
 | !CS | — | Leave unconnected (I2C mode) |
 | SDO | — | Leave unconnected |
 | A1/A2/A3 | — | Leave unconnected |
 
-The board has I2C pull-ups fitted by default (jumper closed). The interrupt line reuses
-the same GPIO3 that was previously connected to the TTP223 OUT pin.
+The board has I2C pull-ups fitted by default (jumper closed). GPIO3 is where the
+accelerometer's INT1 has always been wired — this predates the pot/button work and is
+unchanged by it. The new primary on/off control (`POT_PIN`/`BUTTON_PIN`) deliberately does
+*not* reuse this pin; it goes on GPIO1, which was free on the existing board and physically
+accessible (see `doc/firmware_architecture.md`). This is a running physical build, so
+GPIO3 must not be reassigned regardless of what past documentation revisions said.
 
 **I2C address:** `0x19` by default. Bridge the bottom address jumper to use `0x18`.
 
+**I2C robustness:** `Wire.setTimeOut(I2C_TIMEOUT_MS)` is set in `setup()` so a bus glitch
+(e.g. from LED PWM switching noise) fails a transaction fast instead of blocking `loop()`;
+a task watchdog (`esp_task_wdt`) is also armed as a backstop that reboots the device if
+`loop()` ever stalls regardless of cause. See the Timeout Audit & Watchdog section in
+`doc/firmware_architecture.md`.
+
 ---
 
-## config.h Additions
+## config.h Values
 
-```cpp
-// ── LIS3DH ────────────────────────────────────────────────────────────────────
-
-// I2C & interrupt pins
-#define LIS3DH_SDA_PIN       8       // I2C SDA
-#define LIS3DH_SCL_PIN       9       // I2C SCL
-#define LIS3DH_INT_PIN       3       // INT1 → deep sleep ext0 wakeup (replaces TOUCH_PIN)
-#define LIS3DH_I2C_ADDR      0x19    // Default; 0x18 if address jumper bridged
-
-// Axis enable (CLICK_CFG register 0x38)
-// Enable the axes that will respond to taps.
-// Bits: [-, -, ZD, ZS, YD, YS, XD, XS]
-//   ZD/YD/XD = double-tap enable per axis
-//   ZS/YS/XS = single-tap enable per axis
-// Z-axis up (lamp tapped from the top):   0x30  ← default
-// All axes (useful for debugging):        0x3F
-// X+Y only (accelerometer mounted flat):  0x0F
-#define LIS3DH_CLICK_CFG     0x30
-
-// Tap amplitude threshold (CLICK_THS register 0x3A)
-// 1 LSB = FS/128 = ~16 mg at FS=±2g (CTRL_REG4 default)
-// Range: 0x00–0x7F.  Start at 0x20 (~512 mg) and tune down if taps are missed.
-// Lower value = more sensitive. Too low = false triggers from vibration.
-#define LIS3DH_CLICK_THS     0x20
-
-// Output data rate (CTRL_REG1 0x20)
-// Sets time resolution of all timing registers (1 LSB = 1/ODR).
-// 0x57 = ODR 100 Hz, low-power mode, X+Y+Z enabled (~6 µA)
-// 0x5F = ODR 100 Hz, low-power mode, all axes  (same power, use if CLICK_CFG = 0x3F)
-// Change ODR only if timing values below need finer resolution (e.g. 0x67 for 200 Hz).
-#define LIS3DH_CTRL_REG1     0x57
-
-// Tap timing — all values in ODR ticks (1 tick = 1/ODR = 10 ms at 100 Hz)
-//
-// TIME_LIMIT (0x3B): maximum duration of a single tap impulse.
-// The acceleration must exceed the threshold and return below it within this window.
-// Too short → sharp taps rejected.  Too long → slow presses misread as taps.
-// 0x08 = 80 ms at 100 Hz  ← start here
-#define LIS3DH_TIME_LIMIT    0x08
-
-// TIME_LATENCY (0x3C): dead time after the first tap during which a second tap
-// is ignored.  Prevents the same physical impulse ringing into a false double-tap.
-// 0x10 = 160 ms at 100 Hz  ← start here
-#define LIS3DH_TIME_LATENCY  0x10
-
-// TIME_WINDOW (0x3D): window after TIME_LATENCY in which the second tap must arrive
-// for a double-tap to be recognised.
-// Total double-tap acceptance window = TIME_LATENCY + TIME_WINDOW.
-// 0x18 = 240 ms at 100 Hz → total window = 160 + 240 = 400 ms  ← start here
-#define LIS3DH_TIME_WINDOW   0x18
-```
-
-The existing `TOUCH_PIN` define is superseded by `LIS3DH_INT_PIN`. The other pin
-defines (`WHITE_LED_PIN`, `WARM_LED_PIN`, `BATTERY_PIN`) are unchanged.
+All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_CTRL_REG1`,
+timing registers, pins) live in `firmware/include/config.h` — that file is the source of
+truth; don't duplicate values here where they can drift out of sync. Current defaults use
+single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the hardware doesn't do any
+double-tap discrimination (ring-down from one physical tap falls within its own double-tap
+window, making every tap look like a Dclick) — the multi-tap gesture is counted in firmware
+instead, from a sequence of single-tap events. See Gesture Behaviour below.
 
 ---
 
 ## Gesture Behaviour
 
-### While OFF (deep sleep)
-
-Any tap — single or double — simply wakes the lamp and turns it on. No gesture
-discrimination is performed on wakeup. The act of tapping is the intent; which tap
-it was is irrelevant.
-
-Implementation: on wakeup from `LIS3DH_INT_PIN` (ext0), read and discard `CLICK_SRC`
-to clear the latched interrupt, then proceed straight to the ON state.
-
-### While ON (awake)
+### While ON (awake) — both modes
 
 | Gesture | Action |
 |---|---|
-| Single tap | Toggle off |
-| Double tap | Switch mode (warm ↔ cool) |
+| Exactly `ACCEL_MODE_SWAP_TAP_COUNT` taps on lamp body (default 2, i.e. double tap) | Switch mode (warm ↔ cool) — same action as double-tapping the button in button mode |
+| Any other tap count (including 1, and any overshoot) | Ignored |
 
-Because the hardware fires a single-tap interrupt immediately and a double-tap interrupt
-only after the full `TIME_LATENCY + TIME_WINDOW` period, the firmware must wait before
-acting. After `INT1` fires while the lamp is on:
+This is an **exact** match, not "2 or more": a single tap is always ignored as an incidental
+bump (see below), but a count that overshoots the configured value is discarded too, not
+treated as a match. In pot mode especially, the accelerometer is mounted to the same
+enclosure the user's hand is on constantly while turning the dial — treating every detected
+tap as a mode swap would mean brightness adjustments randomly flip WARM/COOL. Requiring an
+exact count also has a second purpose: it leaves the *other* of {double, triple} tap
+completely free for a future gesture, without needing new hardware — set
+`ACCEL_MODE_SWAP_TAP_COUNT` to 3 to swap which one drives the mode swap.
 
-1. Wait `TIME_LATENCY + TIME_WINDOW` (≈ 400 ms with default values)
-2. Read `CLICK_SRC` (register `0x39`)
-3. If `Dtap` bit (bit 5) is set → switch mode
-4. Otherwise (`Stap` bit 4 only) → toggle off
+`updateAccelInput()` in `main.cpp` counts taps to implement this: each detected `Sclick`
+increments a counter and starts `LIS3DH_RING_SUPPRESS_MS` (300 ms) of dead time to absorb
+that tap's own ring-down, then watches for `LIS3DH_GESTURE_WINDOW_MS` (250 ms) for another
+tap. If the window closes with exactly `ACCEL_MODE_SWAP_TAP_COUNT` taps counted, the mode
+swaps (via `handleModeSwap()` — the callback isn't named for a specific tap count any more,
+since the accelerometer's trigger count is configurable); any other count is discarded.
+`config.h` rejects `ACCEL_MODE_SWAP_TAP_COUNT` values outside {2, 3} at compile time — 1 must
+stay reserved as the incidental-bump filter.
 
-This introduces a ~400 ms latency on deliberate taps while the lamp is on, which is
-acceptable for a lamp. Reduce `TIME_WINDOW` to shorten it if needed.
+On/off and brightness are always handled by the primary control (pot or button), never the
+accelerometer. The battery indicator is handled by the primary control in button mode
+(triple tap) and shown automatically on wake/turn-on when battery is LOW/CRITICAL in both
+modes — there's no accelerometer gesture for it.
+
+### While OFF or asleep
+
+**Button mode:** the accelerometer plays no role at all — its interrupt line
+(`LIS3DH_INT_PIN`, GPIO3) is independent of the button's wake pin (`BUTTON_PIN`, GPIO1), and
+`updateAccelInput()` ignores taps whenever `currentLampState != ON` (mode-swap is a no-op
+while OFF, same as double-tapping the button while OFF).
+
+**Pot mode:** an accelerometer tap is the *only* thing that wakes the device from deep
+sleep — `LIS3DH_INT_PIN` is configured as the `esp_deep_sleep_enable_gpio_wakeup` source.
+A wake doesn't automatically turn the lamp on, though: it might just be a hand bumping the
+lamp while reaching for the dial. On wake, `setup()` clears the latched interrupt, takes a
+fresh reading of the pot, and only calls `turnOn()` if the pot itself is requesting ON —
+otherwise the device goes straight back toward deep sleep, invisibly to the user. See the
+Potentiometer mode section in `doc/firmware_architecture.md`.
 
 ---
 
@@ -170,15 +159,13 @@ bool double_tap  = (src >> 5) & 0x01;  // Dtap bit
 
 ## Power
 
-In power-down mode (ODR bits = `0000` in CTRL_REG1) the LIS3DH draws ~0.4 µA —
-lower than the TTP223's ~1.5 µA standby. However, the click detection engine is
-inactive in power-down mode; the lamp relies on deep sleep wakeup via the latched
-`INT1` from the last tap, so the chip should remain in its configured low-power ODR
-mode rather than powered-down while the system is asleep.
-
-At 100 Hz low-power mode, current draw is ~6 µA, replacing the TTP223's ~1.5 µA.
-The net change to the deep sleep budget is approximately **+4.5 µA**, bringing the
-estimated total from ~22.5 µA to ~27 µA — still comfortably negligible.
+In pot mode the accelerometer must stay in its configured 100 Hz low-power ODR mode
+(~6 µA) through deep sleep, since it's the wake source. In button mode it's not involved in
+wakeup at all — the click engine only needs to be live while the lamp is ON to catch a
+mode-swap tap — but it's left running through sleep there too anyway, for simplicity and to
+avoid extra power-sequencing code; the click engine being live doesn't cost anything extra
+by itself. Net addition to the deep sleep budget vs. no accelerometer at all is ~6 µA
+either way, see the Power Management section in `doc/firmware_architecture.md`.
 
 ---
 
@@ -188,13 +175,27 @@ All timing and threshold values require empirical adjustment once the sensor is
 physically mounted in the lamp body:
 
 - **`LIS3DH_CLICK_THS`** — if taps are frequently missed, lower the value; if the lamp
-  triggers from being set down on a surface, raise it.
+  triggers from being set down on a surface (or, in pot mode, from ordinary handling while
+  turning the dial), raise it. This is the first knob to reach for if single incidental
+  bumps are registering as taps often enough to matter — the firmware-side exact-tap-count
+  requirement (below) is the second line of defense, not a replacement for a sane threshold.
+- **`ACCEL_MODE_SWAP_TAP_COUNT`** — which exact tap count (2 or 3) drives the mode swap; the
+  other is left completely unbound for a future gesture. Not really a "tuning" value in the
+  empirical sense — pick it once based on which physical gesture you want to reserve, not
+  based on sensor behavior.
 - **`LIS3DH_TIME_LIMIT`** — if fast sharp taps are rejected, raise it; if slow presses
   falsely trigger taps, lower it.
-- **`LIS3DH_TIME_LATENCY`** — raise if the physical impulse of the first tap rings into
-  a spurious second detection; lower to allow faster double-taps.
-- **`LIS3DH_TIME_WINDOW`** — controls how quickly the user must complete a double-tap.
-  400 ms total is a comfortable starting point.
+- **`LIS3DH_TIME_LATENCY`** / **`LIS3DH_TIME_WINDOW`** — currently unused; the LIS3DH's own
+  hardware double-tap detection is disabled (see `LIS3DH_CLICK_CFG` above), so these
+  timing registers have no effect. Only relevant if hardware double-tap detection is ever
+  re-enabled.
+- **`LIS3DH_RING_SUPPRESS_MS`** — raise if a single physical tap's ring-down is still
+  getting counted as a second tap (inflating a deliberate single-tap-that-should-be-ignored
+  into an accidental double); lower to make back-to-back deliberate taps register faster.
+- **`LIS3DH_GESTURE_WINDOW_MS`** — controls how quickly the second (or third) tap of a
+  deliberate gesture must arrive after the previous one's ring-down clears. Raise if
+  intentional double-taps are being missed (window closing before the next tap lands);
+  lower to make the gesture feel snappier.
 - **`LIS3DH_CLICK_CFG`** — if Z-axis taps are unreliable with the sensor mounted at an
   angle, enable additional axes (`0x3F`) and check the Z/Y/X bits of `CLICK_SRC`
   (bits 2–0) to see which axis is actually firing, then narrow the config accordingly.

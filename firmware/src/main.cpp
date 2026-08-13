@@ -1,10 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_sleep.h>
+#include <esp_task_wdt.h>
+#include <esp_idf_version.h>
 #include "config.h"
 #include "led_control.h"
 #include "touch_input.h"
 #include "battery_monitor.h"
+#ifdef USE_POT_INPUT
+#include "pot_input.h"
+#endif
 #ifdef USE_ACCEL_INPUT
 #include <Wire.h>
 #include "accel_input.h"
@@ -25,6 +30,22 @@ static unsigned long lastInteractionTime = 0;
 // Helper: pointer to the brightness variable for a given mode
 static uint8_t* getModeBrightness(uint8_t mode) {
   return (mode == MODE_WARM) ? &warmBrightness : &coolBrightness;
+}
+
+// Tracks the recurring low-battery reminder (see loop()): when the indicator was last
+// shown, and which state it was last shown for, so the periodic reminder knows both when
+// to repeat and when to fire immediately because the battery just got worse.
+static unsigned long lastBatteryIndicatorTime = 0;
+static BatteryState lastAnnouncedBatteryState = BATTERY_NORMAL;
+
+// Every trigger site (turn-on, wake, on-demand triple tap, and the periodic reminder in
+// loop()) goes through this so they all share one "when did we last show it" clock —
+// otherwise the periodic reminder would have no way to know a turn-on/wake/manual check
+// already covered the user just now.
+static void showBatteryIndicator(BatteryState state) {
+  playBatteryIndicator(state);
+  lastBatteryIndicatorTime = millis();
+  lastAnnouncedBatteryState = state;
 }
 
 // Callback: single tap — toggle ON/OFF
@@ -49,19 +70,30 @@ void handleSingleTap() {
     // Auto battery indicator when LOW or CRITICAL
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
       setTouchBlocked(true);
-      playBatteryIndicator(batteryState);
+      showBatteryIndicator(batteryState);
     }
   }
 }
 
-// Callback: double tap — swap warm/cool (ignored when OFF)
-void handleDoubleTap() {
-  DEBUG_PRINTLN(">>> DOUBLE TAP");
+// Callback: button double tap, or the configured accelerometer tap count — swap warm/cool
+// (ignored when OFF). Named for what it does rather than "double tap" specifically, since
+// the accelerometer's trigger count is configurable (ACCEL_MODE_SWAP_TAP_COUNT) and may not
+// be two.
+void handleModeSwap() {
+  DEBUG_PRINTLN(">>> MODE SWAP (button double tap or configured accel tap count)");
   lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
   savedMode = (savedMode == MODE_WARM) ? MODE_COOL : MODE_WARM;
+#ifdef USE_POT_INPUT
+  // Brightness isn't stored per mode in pot mode — it's always just wherever the pot
+  // currently points, so swap to that rather than a remembered value.
+  uint8_t target = getPotBrightnessTarget();
+  swapMode(savedMode, target);
+  setBrightnessTarget(target);
+#else
   swapMode(savedMode, *getModeBrightness(savedMode));
+#endif
 }
 
 // Callback: triple tap — show battery level indicator (ignored when OFF)
@@ -72,7 +104,7 @@ void handleTripleTap() {
 
   readBatteryVoltage();
   setTouchBlocked(true);
-  playBatteryIndicator(getBatteryState());
+  showBatteryIndicator(getBatteryState());
 }
 
 // Callback: long press initial trigger — first brightness increment
@@ -100,6 +132,54 @@ void handleLongPressEnd() {
   reverseBrightnessDirection();
 }
 
+#ifdef USE_POT_INPUT
+// Drives on/off and brightness from the potentiometer every loop() iteration. Unlike the
+// button, the pot has no discrete "tap" — it's a continuously polled position, so this
+// isn't a gesture callback, it's compared each tick against the lamp's current state to
+// detect ON/OFF edges.
+static void updatePotControl() {
+  updatePotInput();
+  bool wantsOn = isPotRequestingOn();
+  uint8_t target = getPotBrightnessTarget();
+  static uint8_t lastInteractionTarget = 0;
+
+  if (wantsOn && currentLampState != ON) {
+    DEBUG_PRINTLN(">>> POT: requesting ON");
+    lastInteractionTime = millis();
+    lastInteractionTarget = target;
+
+    readBatteryVoltage();
+    BatteryState batteryState = getBatteryState();
+    if (batteryState == BATTERY_CUTOFF) {
+      DEBUG_PRINTLN("Battery CUTOFF - refusing to turn on, entering deep sleep");
+      enterDeepSleep();
+    }
+
+    // Ramp up via the brightness slew (see turnOnAtZero()) instead of turnOn()'s fixed
+    // crossfade, matching the "eased with BRIGHTNESS_SLEW_TIME_CONSTANT_MS" pot on-transition
+    // documented in config.h.
+    turnOnAtZero(savedMode);
+    setBrightnessTarget(target);
+
+    if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
+      showBatteryIndicator(batteryState);
+    }
+  } else if (!wantsOn && currentLampState == ON) {
+    DEBUG_PRINTLN(">>> POT: requesting OFF");
+    lastInteractionTime = millis();
+    turnOff();
+  } else if (wantsOn && currentLampState == ON) {
+    setBrightnessTarget(target);
+    // Only count real movement as interaction — filters ADC jitter that would
+    // otherwise reset the auto-off timer forever.
+    if (abs((int)target - (int)lastInteractionTarget) > POT_MOVEMENT_DEADBAND) {
+      lastInteractionTime = millis();
+      lastInteractionTarget = target;
+    }
+  }
+}
+#endif
+
 #ifdef USE_ACCEL_INPUT
 static void debugClickSrc(uint8_t src) {
   DEBUG_PRINT("ACCEL: CLICK_SRC=0x");
@@ -116,59 +196,86 @@ static void debugClickSrc(uint8_t src) {
   DEBUG_PRINTLN("]");
 }
 
-// Non-blocking state machine: waits LIS3DH_DOUBLE_TAP_WAIT_MS after INT1 fires,
-// then reads CLICK_SRC to discriminate single vs double tap.
+// Non-blocking state machine. Mode swap requires an *exact* ACCEL_MODE_SWAP_TAP_COUNT taps
+// (2 or 3, config.h) — not "2 or more" — so the other of {double, triple} tap stays free for
+// a future gesture. A single tap is always ignored regardless of the configured count, since
+// the lamp body gets bumped constantly during ordinary use (in pot mode especially: turning
+// the knob shakes the enclosure the accelerometer is mounted to).
+//
+//   IDLE/WAITING  → INT1 fires (Sclick) → tapCount++, RING_SUPPRESS (absorb this tap's ringing)
+//   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS → WAITING (watch for the next tap)
+//   WAITING       → another tap arrives → back to RING_SUPPRESS; or
+//                   LIS3DH_GESTURE_WINDOW_MS passes with no new tap → window closes:
+//                     tapCount == ACCEL_MODE_SWAP_TAP_COUNT → swap mode; any other count
+//                     (including overshoot) → discarded
 static void updateAccelInput() {
-  // Hardware double-tap discrimination is disabled (CLICK_CFG single-tap only).
-  // We read CLICK_SRC immediately on each INT1, then do tap counting in firmware:
-  //   IDLE          → INT1 fires (Sclick) → RING_SUPPRESS
-  //   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS (covers ring-down) → SECOND_TAP
-  //   SECOND_TAP    → INT1 fires again → double tap; or timeout → single tap
-  //   COOLDOWN      → wait LIS3DH_COOLDOWN_MS → IDLE
-  enum AccelState { IDLE, RING_SUPPRESS, SECOND_TAP, COOLDOWN };
+  enum AccelState { IDLE, RING_SUPPRESS, WAITING };
   static AccelState state = IDLE;
-  static unsigned long stateStart = 0;
+  static uint8_t tapCount = 0;
+  static unsigned long suppressStart = 0;
+  static unsigned long waitingStartTime = 0;
 
-  if (state == IDLE) {
-    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
-      uint8_t src = accelReadClickSrc();
-      DEBUG_PRINT("ACCEL: tap detected: ");
-      debugClickSrc(src);
-      if ((src >> 4) & 0x01) {  // Sclick
-        stateStart = millis();
-        state = RING_SUPPRESS;
-      } else {
-        DEBUG_PRINTLN("ACCEL: no Sclick — ignoring");
-      }
+  if (state == RING_SUPPRESS) {
+    if (millis() - suppressStart >= LIS3DH_RING_SUPPRESS_MS) {
+      state = WAITING;
+      waitingStartTime = millis();  // Window is timed from here, not from the tap itself —
+                                     // LIS3DH_RING_SUPPRESS_MS already elapsed by this point.
     }
-  } else if (state == RING_SUPPRESS) {
-    if (millis() - stateStart >= LIS3DH_RING_SUPPRESS_MS) {
-      DEBUG_PRINTLN("ACCEL: ring-down window passed — watching for second tap");
-      stateStart = millis();
-      state = SECOND_TAP;
+    return;  // Ignore INT1 entirely while suppressing this tap's ring-down
+  }
+
+  if (state == WAITING && millis() - waitingStartTime >= LIS3DH_GESTURE_WINDOW_MS) {
+    if (tapCount == ACCEL_MODE_SWAP_TAP_COUNT) {
+      DEBUG_PRINTLN("ACCEL: tap gesture → swap mode");
+      handleModeSwap();
+    } else {
+      DEBUG_PRINT("ACCEL: ");
+      DEBUG_PRINT(tapCount);
+      DEBUG_PRINTLN(" tap(s) ignored (not the configured mode-swap count)");
     }
-  } else if (state == SECOND_TAP) {
-    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
-      uint8_t src = accelReadClickSrc();
-      DEBUG_PRINT("ACCEL: second tap: ");
-      debugClickSrc(src);
-      DEBUG_PRINTLN("ACCEL: double tap → swap mode");
-      handleDoubleTap();
-      stateStart = millis();
-      state = COOLDOWN;
-    } else if (millis() - stateStart >= LIS3DH_SECOND_TAP_MS) {
-      DEBUG_PRINTLN("ACCEL: single tap → toggle on/off");
-      handleSingleTap();
-      stateStart = millis();
-      state = COOLDOWN;
-    }
-  } else {
-    if (millis() - stateStart >= LIS3DH_COOLDOWN_MS) {
-      state = IDLE;
+    tapCount = 0;
+    state = IDLE;
+  }
+
+  if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
+    uint8_t src = accelReadClickSrc();
+    DEBUG_PRINT("ACCEL: tap detected: ");
+    debugClickSrc(src);
+    if ((src >> 4) & 0x01) {  // Sclick
+      tapCount++;
+      suppressStart = millis();
+      state = RING_SUPPRESS;
     }
   }
 }
 #endif
+
+// Task watchdog: reboots the device if loop() ever fails to check in for
+// WATCHDOG_TIMEOUT_MS (e.g. an I2C bus lockup on the accelerometer link, or any
+// future bug that blocks the loop). The API shape changed between ESP-IDF 4 and 5
+// (Arduino core versions), so branch on the IDF major version to support both.
+static void initWatchdog() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WATCHDOG_TIMEOUT_MS,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+  };
+  esp_err_t err = esp_task_wdt_init(&wdtConfig);
+  if (err == ESP_ERR_INVALID_STATE) {
+    // Framework already initialized the TWDT with its own defaults — apply ours instead.
+    esp_task_wdt_reconfigure(&wdtConfig);
+  }
+#else
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_MS / 1000, true);
+#endif
+
+  esp_err_t addErr = esp_task_wdt_add(NULL);  // Subscribe the loop task (current task)
+  if (addErr != ESP_OK && addErr != ESP_ERR_INVALID_STATE) {
+    DEBUG_PRINTLN("WARNING: failed to subscribe loop task to watchdog");
+  }
+  DEBUG_PRINTLN("Watchdog armed");
+}
 
 void setup() {
 #if DEBUG
@@ -188,22 +295,42 @@ void setup() {
   // Check wakeup reason before module init
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
+#ifdef USE_POT_INPUT
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+    // Release the hold before initPotInput() reconfigures this pin — a held pin won't
+    // respond to pinMode()/digitalWrite() until the hold is explicitly disabled.
+    gpio_hold_dis((gpio_num_t)POT_POWER_PIN);
+  }
+#endif
+
   // Initialize modules
+#ifdef USE_POT_INPUT
+  initPotInput();
+  // Let the RC front end settle before trusting any reading — covers both this wake path
+  // and a fresh power-on, since initPotInput() (and thus potPowerOn()) always runs here.
+  delay(POT_SETTLE_MS);
+#else
   initTouch();
+#endif
   initLED();
   initBatteryMonitor();
+  initWatchdog();
 
 #ifdef USE_ACCEL_INPUT
   Wire.begin(LIS3DH_SDA_PIN, LIS3DH_SCL_PIN);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Bound I2C transactions so a bus glitch can't block loop()
   accelInit();
   accelDumpConfig();
+  // Flush any latched INT1 left over from before a reset/reflash so the first loop()
+  // iteration doesn't immediately read it as a fresh tap.
+  accelReadClickSrc();
 #endif
 
-  // Register callbacks
+#ifndef USE_POT_INPUT
+  // Register callbacks — the physical button drives the full gesture set.
   setSingleTapCallback(handleSingleTap);
-  setDoubleTapCallback(handleDoubleTap);
+  setDoubleTapCallback(handleModeSwap);
   setTripleTapCallback(handleTripleTap);
-#ifndef USE_ACCEL_INPUT
   setLongPressStartCallback(handleLongPressStart);
   setLongPressHoldCallback(handleLongPressHold);
   setLongPressEndCallback(handleLongPressEnd);
@@ -211,19 +338,34 @@ void setup() {
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     DEBUG_PRINTLN("Woke from deep sleep!");
-    lastInteractionTime = millis();
 
     // Disable GPIO hold to allow PWM control again
     gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
     gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
 
-#ifdef USE_ACCEL_INPUT
-    // Clear latched INT1 — on wakeup any tap means "turn on", no discrimination needed
-    uint8_t wakeSrc = accelReadClickSrc();
-    DEBUG_PRINT("ACCEL: wakeup ");
-    debugClickSrc(wakeSrc);
-#endif
+#ifdef USE_POT_INPUT
+    // The accelerometer tap that woke us doesn't necessarily mean "turn on" — it might
+    // just be the bump of a hand reaching for the dial. Clear its latch, then take a
+    // fresh pot reading and let that decide: if the pot itself is still at OFF, stay OFF
+    // and let the deep-sleep timer below put the device straight back to sleep.
+    accelReadClickSrc();
+    updatePotInput();
+    if (isPotRequestingOn()) {
+      lastInteractionTime = millis();
+      uint8_t target = getPotBrightnessTarget();
+      turnOnAtZero(savedMode);
+      setBrightnessTarget(target);
 
+      readBatteryVoltage();
+      BatteryState batteryState = getBatteryState();
+      if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
+        showBatteryIndicator(batteryState);
+      }
+    } else {
+      DEBUG_PRINTLN("Woke but pot is still at OFF — going back to sleep shortly");
+    }
+#else
+    lastInteractionTime = millis();
     // Restore saved mode and brightness
     turnOn(savedMode, *getModeBrightness(savedMode));
 
@@ -232,23 +374,31 @@ void setup() {
     BatteryState batteryState = getBatteryState();
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
       setTouchBlocked(true);
-      playBatteryIndicator(batteryState);
+      showBatteryIndicator(batteryState);
     }
+#endif
   } else {
     DEBUG_PRINTLN("Power-on or reset (staying in OFF)");
     DEBUG_PRINT("Saved mode: ");
     DEBUG_PRINTLN(savedMode == MODE_WARM ? "WARM" : "COOL");
+#ifndef USE_POT_INPUT
     DEBUG_PRINT("Warm brightness: ");
     DEBUG_PRINT(warmBrightness);
     DEBUG_PRINT(", Cool brightness: ");
     DEBUG_PRINTLN(coolBrightness);
+#endif
   }
 
   DEBUG_PRINTLN("Lamp ready");
-  DEBUG_PRINTLN("Single tap: toggle ON/OFF");
-  DEBUG_PRINTLN("Double tap: swap WARM/COOL");
-  DEBUG_PRINTLN("Long press: adjust brightness");
-  DEBUG_PRINTLN("Triple tap: battery indicator");
+#ifdef USE_POT_INPUT
+  DEBUG_PRINTLN("Pot: turn to set brightness, fully counter-clockwise = OFF");
+  DEBUG_PRINTLN("Accel tap: swap WARM/COOL");
+#else
+  DEBUG_PRINTLN("Button single tap: toggle ON/OFF");
+  DEBUG_PRINTLN("Button double tap (or accel tap): swap WARM/COOL");
+  DEBUG_PRINTLN("Button long press: adjust brightness");
+  DEBUG_PRINTLN("Button triple tap: battery indicator");
+#endif
   DEBUG_PRINT("Deep sleep after ");
   DEBUG_PRINT(DEEP_SLEEP_TIMEOUT_MS / 1000);
   DEBUG_PRINTLN("s in OFF state");
@@ -260,12 +410,18 @@ void setup() {
 }
 
 void loop() {
-#ifdef USE_ACCEL_INPUT
-  updateAccelInput();
+#ifdef USE_POT_INPUT
+  updatePotControl();
 #else
   updateButton();
 #endif
+#ifdef USE_ACCEL_INPUT
+  updateAccelInput();
+#endif
   updateModeTransition();
+#ifdef USE_POT_INPUT
+  updateBrightnessSlew();
+#endif
   updateBatteryMonitor();
   updateBatteryIndicator();
 
@@ -277,6 +433,32 @@ void loop() {
   }
   indicatorWasPlaying = indicatorNowPlaying;
 
+  // Recurring low-battery reminder while ON: fires immediately the moment the battery
+  // worsens into LOW/CRITICAL (whether that's a fresh drain while already ON, or a
+  // degrade from LOW to CRITICAL), then repeats periodically for as long as it stays
+  // that way. Turn-on/wake/on-demand triggers elsewhere already cover "just started using
+  // it with a bad battery" — this covers "still using it, and it's gotten worse or it's
+  // been a while since the last reminder."
+  if (currentLampState == ON && !isPlayingIndicator()) {
+    BatteryState bs = getBatteryState();
+    if (bs == BATTERY_LOW || bs == BATTERY_CRITICAL) {
+      unsigned long repeatInterval = (bs == BATTERY_CRITICAL)
+        ? BATTERY_INDICATOR_REPEAT_CRITICAL_MS : BATTERY_INDICATOR_REPEAT_LOW_MS;
+      bool worsenedSinceLastShown = (bs != lastAnnouncedBatteryState);
+      if (worsenedSinceLastShown || millis() - lastBatteryIndicatorTime >= repeatInterval) {
+        DEBUG_PRINTLN(">>> Recurring low-battery reminder");
+#ifndef USE_POT_INPUT
+        setTouchBlocked(true);
+#endif
+        showBatteryIndicator(bs);
+      }
+    } else {
+      // Battery recovered — clear the "worsened" memory so a future dip announces
+      // immediately again instead of waiting out a stale repeat interval.
+      lastAnnouncedBatteryState = bs;
+    }
+  }
+
   // Auto-off: turn off after AUTO_OFF_TIMEOUT_MS of no user interaction
 #if AUTO_OFF_ENABLED
   if (currentLampState == ON && !isPlayingIndicator()) {
@@ -287,25 +469,38 @@ void loop() {
   }
 #endif
 
-  // Deep sleep timer: only when OFF and no indicator playing
+  // Deep sleep timer: only when OFF and no indicator playing.
+  // Uses an explicit "running" flag rather than treating offStateStartTime == 0 as
+  // "not started" — millis() legitimately returns 0 briefly after boot, which would
+  // otherwise make the timer think it needs to (re-)start forever at that instant.
   static unsigned long offStateStartTime = 0;
+  static bool offTimerRunning = false;
   if (currentLampState == OFF && !isPlayingIndicator()) {
-    if (offStateStartTime == 0) {
+    if (!offTimerRunning) {
       offStateStartTime = millis();
+      offTimerRunning = true;
       DEBUG_PRINTLN("OFF state - deep sleep timer started");
     } else if (millis() - offStateStartTime >= DEEP_SLEEP_TIMEOUT_MS) {
       enterDeepSleep();
     }
   } else {
-    offStateStartTime = 0;
+    offTimerRunning = false;
   }
+
+  // Pet the watchdog — if loop() ever fails to reach here within WATCHDOG_TIMEOUT_MS
+  // (e.g. an I2C hang), the device reboots instead of staying frozen.
+  esp_task_wdt_reset();
 
   delay(1);  // Minimal delay for smooth transitions
 }
 
 void enterDeepSleep() {
   DEBUG_PRINTLN("Entering deep sleep...");
-  DEBUG_PRINTLN("Touch button to wake");
+#ifdef USE_POT_INPUT
+  DEBUG_PRINTLN("Tap/bump the lamp to wake");
+#else
+  DEBUG_PRINTLN("Press button to wake");
+#endif
 
   // Ensure LEDs are completely off
   ledcWrite(0, 0);  // WHITE_LED_CHANNEL
@@ -321,8 +516,19 @@ void enterDeepSleep() {
   digitalWrite(WARM_LED_PIN, LOW);
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
 
-  // Configure wake on GPIO3 (TOUCH_PIN) going HIGH
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+#ifdef USE_POT_INPUT
+  // Cut power to the pot's divider and latch it LOW through sleep — see the
+  // POT_POWER_PIN comment in config.h for why this needs no external switch transistor.
+  potPowerOff();
+  gpio_hold_en((gpio_num_t)POT_POWER_PIN);
+
+  // No physical button in this configuration — the accelerometer tap is the sole wake
+  // source (config.h enforces USE_ACCEL_INPUT whenever USE_POT_INPUT is defined).
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << LIS3DH_INT_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+#else
+  // Configure wake on BUTTON_PIN going HIGH (accelerometer is not a wake source)
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+#endif
 
   delay(100);  // Allow serial to flush
   esp_deep_sleep_start();

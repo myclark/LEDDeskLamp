@@ -26,6 +26,7 @@ extern SerialClass Serial;
 unsigned long millis();
 int analogRead(uint8_t pin);
 int digitalRead(uint8_t pin);
+void digitalWrite(uint8_t pin, uint8_t val);
 void delay(unsigned long ms);
 void pinMode(uint8_t pin, uint8_t mode);
 void analogReadResolution(uint8_t bits);
