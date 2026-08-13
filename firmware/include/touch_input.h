@@ -4,9 +4,10 @@
 #include <Arduino.h>
 #include "config.h"
 
-// Input provider abstraction — allows swapping TTP223 touch, button, or accelerometer
+// Input provider abstraction — allows swapping between a physical button, capacitive
+// touch, or an event-based sensor without touching the gesture logic below.
 // The reader function should return true when the input is "active" (pressed/detected).
-// Default: reads TOUCH_PIN HIGH (TTP223 behavior).
+// Default: reads BUTTON_PIN HIGH (physical button with external pull-down).
 typedef bool (*InputStateReader)(void);
 void registerInputReader(InputStateReader reader);
 

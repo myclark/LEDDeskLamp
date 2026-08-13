@@ -12,24 +12,13 @@ void registerInputReader(InputStateReader reader);
 void injectInputEvent(bool pressed);  // for event-based sensors
 ```
 
-**Default (TTP223):** reads `digitalRead(TOUCH_PIN) == HIGH`. Registered automatically in `initTouch()`.
+**Default (physical button):** reads `digitalRead(BUTTON_PIN) == HIGH`. Registered automatically in `initTouch()`. Wire the button between `BUTTON_PIN` and 3.3V with an external ~10kΩ pull-down to GND (idle LOW, pressed HIGH) — this is the same active-HIGH polarity the old TTP223 module used, so `touch_input.cpp` and its debounce/gesture engine are unchanged; only the physical part swapped.
 
-**Button (active-low with pull-up):**
-```cpp
-bool buttonReader() { return digitalRead(BUTTON_PIN) == LOW; }
-registerInputReader(buttonReader);
-```
+**Accelerometer (auxiliary, mode-swap only):** the LIS3DH no longer goes through the `InputStateReader`/`injectInputEvent()` path at all. It never drove on/off — that always went through the button's own gesture engine — so `main.cpp`'s `updateAccelInput()` just watches `LIS3DH_INT_PIN` directly and calls `handleDoubleTap()` (mode swap) on every detected tap, with a cooldown to ignore ring-down re-triggers. See `doc/accel_input_integration.md`.
 
-**Accelerometer (event-based):** accelerometers fire interrupts, not continuous state. Use `injectInputEvent()`:
-```cpp
-void IRAM_ATTR onTapDetected() {
-  injectInputEvent(true);
-  // call injectInputEvent(false) after ~DEBOUNCE_MS via timer or flag in loop()
-}
-```
-`injectInputEvent()` auto-registers the injected-state reader.
+**Full gesture set lives on the button:** single tap (on/off), double tap (swap mode — also reachable via an accelerometer tap), long press (brightness), triple tap (battery indicator). The accelerometer is optional and additive; comment out `USE_ACCEL_INPUT` in `config.h` to run button-only, or remove the sensor entirely.
 
-**Deep sleep:** wake source is currently `TOUCH_PIN HIGH`. Changing input hardware requires updating `enterDeepSleep()` in `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
+**Deep sleep:** wake source is `BUTTON_PIN HIGH` only — the accelerometer does not wake the device. Changing input hardware requires updating `enterDeepSleep()` in `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
 
 ## Brightness Control
 
@@ -67,9 +56,47 @@ Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LO
 **Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, `turnOff()` is called; deep sleep timer then starts. `lastInteractionTime` is updated in every gesture callback and on wake from deep sleep.
 
 **Estimated power:**
-- Deep sleep: ~10 µA (ESP32-C3) + 1.5 µA (TTP223) + 11 µA (divider) ≈ 22.5 µA
+- Deep sleep: ~10 µA (ESP32-C3) + ~6 µA (LIS3DH, stays in low-power ODR mode for the mode-swap gesture) + 11 µA (divider) ≈ 27 µA — a physical button draws no standby current itself.
 - ON at 50% PWM: 60–90 mA → ~28–40 h runtime (2500 mAh)
 - ON at 100% PWM: 120–180 mA → ~14–20 h runtime
+
+## Timeout Audit & Watchdog
+
+Every `millis()`-based timer in the firmware (auto-off, deep-sleep entry, debounce, gesture
+window, long-press, battery read/display intervals, boundary flash, mode transition, battery
+indicator, accelerometer cooldown) uses the standard `millis() - lastEvent >= threshold`
+idiom, which is safe across the `millis()` 32-bit rollover (~49.7 days) because unsigned
+subtraction wraps correctly. No rollover bugs were found there.
+
+The one real bug found was the deep-sleep timer's "not started" check: it used
+`offStateStartTime == 0` as a sentinel, which is wrong at the exact instant `millis()` itself
+returns 0 (very early boot). Fixed with an explicit `offTimerRunning` flag instead of an
+overloaded zero value.
+
+**Suspected cause of the reported freezes:** `Wire` (I2C) calls to the LIS3DH have no
+timeout by default — if the bus glitches (e.g. from PWM switching noise) or `INT1` stays
+latched from a failed read, `updateAccelInput()` can block on an I2C transaction every loop
+iteration, stalling the entire `loop()` (and with it, gesture handling, auto-off, and deep
+sleep) with no way to recover. Two mitigations:
+
+1. `Wire.setTimeOut(I2C_TIMEOUT_MS)` (50 ms, see `config.h`) bounds every I2C transaction so
+   a bus glitch fails fast instead of hanging.
+2. **Task watchdog** (`esp_task_wdt`, see below) is the hard backstop for this and any other
+   unforeseen stall.
+
+### Task Watchdog Timer
+
+The ESP32-C3 supports both a software **Task Watchdog Timer (TWDT)**, which monitors
+whether subscribed FreeRTOS tasks check in periodically, and a hardware **RTC watchdog**,
+which can catch failures even below the OS level (used mainly as a boot-loop safety net).
+This firmware uses the TWDT: `initWatchdog()` in `main.cpp` subscribes the main loop task
+with a timeout of `WATCHDOG_TIMEOUT_MS` (8 s, generous relative to the ~1 ms normal loop
+period). `loop()` calls `esp_task_wdt_reset()` once per iteration to "pet" it. If `loop()`
+ever fails to reach that call within the timeout — an I2C hang, or any future bug — the
+watchdog panics and reboots the device instead of leaving it frozen. The TWDT API changed
+shape between ESP-IDF 4 (`esp_task_wdt_init(timeout_s, panic)`) and ESP-IDF 5
+(`esp_task_wdt_init(&config)`); `initWatchdog()` branches on `ESP_IDF_VERSION_MAJOR` to
+support whichever Arduino core version is in use.
 
 ## RTC Memory Persistence
 

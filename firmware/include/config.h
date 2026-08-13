@@ -18,13 +18,16 @@
 #endif
 
 // Pin definitions
-#define TOUCH_PIN 3         // Note this can also be reused as a interrupt pin
+// BUTTON_PIN: physical momentary button. Wire the button between BUTTON_PIN and 3.3V,
+// with an external ~10kΩ pull-down resistor from BUTTON_PIN to GND. Idle = LOW, pressed = HIGH.
+// (Same active-HIGH polarity as the old TTP223 module, so touch_input.cpp needs no changes.)
+#define BUTTON_PIN 3         // Physical button input; also the deep-sleep wake pin
 #define WHITE_LED_PIN 10    // White LED control (PWM)
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
 #define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
 #define LIS3DH_SDA_PIN 8    // LIS3DH I2C data
 #define LIS3DH_SCL_PIN 9    // LIS3DH I2C clock (GPIO9 is a strapping pin, but open-drain I2C is safe after reset)
-#define LIS3DH_INT_PIN 3    // LIS3DH INT1 — reuses same GPIO as TOUCH_PIN
+#define LIS3DH_INT_PIN 4    // LIS3DH INT1 — separate pin from BUTTON_PIN now that the button owns GPIO3
 
 // Battery voltage calibration
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
@@ -47,6 +50,13 @@
 #define AUTO_OFF_ENABLED 1              // Set to 0 to disable auto-off
 #define AUTO_OFF_TIMEOUT_MS 14400000    // Auto-off after 4 hours with no interaction
 #define USB_CDC_INIT_DELAY_MS 100       // Delay for USB CDC enumeration on boot
+
+// Watchdog: if the main loop doesn't check in within this window (I2C bus lockup,
+// a future bug, etc.), the task watchdog reboots the device instead of staying frozen.
+#define WATCHDOG_TIMEOUT_MS 8000
+// Bounds every Wire (I2C) transaction so a bus glitch on the accelerometer link can't
+// block loop() indefinitely — it fails fast instead and the watchdog above is just the backstop.
+#define I2C_TIMEOUT_MS 50
 
 // Gesture detection
 #define GESTURE_WINDOW_MS 300   // Max time between taps in a multi-tap sequence
@@ -110,28 +120,27 @@
 #define DEFAULT_BRIGHTNESS 255
 
 // ── Input mode selection ───────────────────────────────────────────────────
-// Define USE_ACCEL_INPUT to use LIS3DH tap detection instead of TTP223.
-// Comment out to revert to capacitive touch (touch_input gesture engine).
+// On/off, brightness, and battery indicator always come from the physical button
+// (touch_input gesture engine on BUTTON_PIN).
+// Define USE_ACCEL_INPUT to additionally enable the LIS3DH accelerometer as an
+// auxiliary trigger for the mode-swap gesture (a tap on the lamp body swaps WARM/COOL,
+// same action as double-tapping the button). Comment out to run button-only —
+// double-tapping the button still swaps modes either way.
 #define USE_ACCEL_INPUT
 
 // ── LIS3DH tap-detection accelerometer ────────────────────────────────────
 // Only relevant when USE_ACCEL_INPUT is defined.
 #define LIS3DH_I2C_ADDR      0x19   // Default; 0x18 if address jumper bridged
 
-#define LIS3DH_CLICK_CFG     0x15   // Single-tap only, all axes (ZS+YS+XS). Double-tap
-                                    // discrimination is done in firmware, not hardware, because
-                                    // ring-down from a physical tap falls within the hardware
-                                    // double-tap window and makes every tap look like a Dclick.
+#define LIS3DH_CLICK_CFG     0x15   // Single-tap only, all axes (ZS+YS+XS). No hardware or
+                                    // firmware double-tap discrimination needed any more —
+                                    // every detected tap simply fires the mode-swap gesture.
 #define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
 #define LIS3DH_TIME_LIMIT    0x06   // 60 ms max tap impulse window — filters slow movement transients
 #define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap
 #define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window
-// After first Sclick, ignore INT1 for this long to suppress ring-down re-triggers,
-// then open a window to watch for a deliberate second tap.
-#define LIS3DH_RING_SUPPRESS_MS   300   // Dead time after first tap (covers ring-down)
-#define LIS3DH_SECOND_TAP_MS      200   // Window after ring-down to catch second tap
-// Post-dispatch cooldown before re-arming (prevents double-dispatch from same event)
+// Post-tap cooldown before re-arming (suppresses ring-down re-triggers from the same tap)
 #define LIS3DH_COOLDOWN_MS        300
 
 #endif // CONFIG_H

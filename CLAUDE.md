@@ -25,7 +25,7 @@ ESP32-C3 SuperMini uses built-in USB — these flags in `platformio.ini` are **r
 build_flags = -D ARDUINO_USB_MODE=1 -D ARDUINO_USB_CDC_ON_BOOT=1
 ```
 
-**Pin mapping:** GPIO3 = touch input, GPIO10 = white LED (PWM), GPIO5 = warm LED (PWM), GPIO0 = battery ADC.
+**Pin mapping:** GPIO3 = physical on/off button, GPIO10 = white LED (PWM), GPIO5 = warm LED (PWM), GPIO0 = battery ADC, GPIO4 = LIS3DH accelerometer interrupt (mode-swap gesture only), GPIO8/GPIO9 = I2C SDA/SCL.
 **GPIO9 is a strapping pin** — avoid it (causes LED glow during sleep/programming).
 
 ## Architecture
@@ -40,9 +40,9 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 | `battery_monitor` | ADC averaging, state machine (NORMAL/LOW/CRITICAL/CUTOFF), brightness limiting |
 | `main.cpp` | Callbacks, RTC persistence, deep sleep, auto-off timeout |
 
-**Input abstraction:** `registerInputReader(fn)` swaps the raw input source (TTP223 → button → accelerometer) without touching gesture logic. Use `injectInputEvent(bool)` for event-based sensors (e.g. accelerometer ISR). See `doc/firmware_architecture.md` for integration patterns.
+**Input abstraction:** `registerInputReader(fn)` swaps the raw input source behind the gesture engine (currently the physical button on `BUTTON_PIN`) without touching gesture logic. Use `injectInputEvent(bool)` for event-based sensors. The accelerometer no longer goes through this path — it's wired directly in `main.cpp` as an auxiliary mode-swap trigger only. See `doc/firmware_architecture.md` for integration patterns.
 
-**Deep sleep wake:** currently `TOUCH_PIN HIGH` — must update `enterDeepSleep()` in `main.cpp` if input hardware changes.
+**Deep sleep wake:** `BUTTON_PIN HIGH` — the accelerometer is not a wake source. Must update `enterDeepSleep()` in `main.cpp` if input hardware changes.
 
 ## Gesture → Action
 
@@ -52,6 +52,8 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 | Double tap | — | Swap WARM ↔ COOL (crossfade) |
 | Long press | — | Adjust brightness (direction reverses on release) |
 | Triple tap | — | Show battery level pulse |
+
+All gestures above are on the physical button. A tap on the lamp body (LIS3DH accelerometer, optional — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only.
 
 Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (60 s).
 
@@ -65,6 +67,7 @@ Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then de
 #define DEEP_SLEEP_TIMEOUT_MS 60000  // 60 seconds in OFF before sleep
 #define ADC_CALIBRATION_FACTOR 0.904 // Tune to match oscilloscope reading
 #define BMS_VOLTAGE_DROP 0.090       // TP4056 MOSFET drop (~90 mV)
+#define WATCHDOG_TIMEOUT_MS 8000     // Reboots if loop() stalls this long (see Timeout Audit & Watchdog in doc/firmware_architecture.md)
 ```
 
 Battery thresholds (`BATTERY_LOW_THRESHOLD`, `BATTERY_CRITICAL_THRESHOLD`, etc.) and all pulse animation params are also in `config.h`.

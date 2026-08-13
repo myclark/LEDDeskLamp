@@ -1,8 +1,9 @@
 # LIS3DH Tap Input — Integration Notes
 
-Replaces the TTP223 capacitive touch module. The LIS3DH (SparkFun SEN-13963) detects
-physical taps on the lamp body via its hardware click-detection engine, with a single
-interrupt line waking the ESP32-C3 from deep sleep.
+Auxiliary input alongside the physical on/off button (see `doc/firmware_architecture.md`).
+The LIS3DH (SparkFun SEN-13963) detects physical taps on the lamp body via its hardware
+click-detection engine and is used **only** to trigger the mode-swap gesture (WARM ↔ COOL) —
+it is not a wake source and does not control power state.
 
 ---
 
@@ -14,107 +15,55 @@ interrupt line waking the ESP32-C3 from deep sleep.
 | GND | GND | |
 | SDA | GPIO8 | I2C data (default ESP32-C3 I2C SDA) |
 | SCL | GPIO9 | I2C clock (default ESP32-C3 I2C SCL) |
-| I1 | GPIO3 | Interrupt + deep sleep wakeup (replaces TTP223 OUT) |
+| I1 | GPIO4 | Interrupt only — not a deep-sleep wakeup source |
 | I2 | — | Not used |
 | !CS | — | Leave unconnected (I2C mode) |
 | SDO | — | Leave unconnected |
 | A1/A2/A3 | — | Leave unconnected |
 
-The board has I2C pull-ups fitted by default (jumper closed). The interrupt line reuses
-the same GPIO3 that was previously connected to the TTP223 OUT pin.
+The board has I2C pull-ups fitted by default (jumper closed). GPIO4 is dedicated to the
+accelerometer interrupt now that GPIO3 belongs exclusively to the physical on/off button
+(`BUTTON_PIN` — see `doc/firmware_architecture.md`).
 
 **I2C address:** `0x19` by default. Bridge the bottom address jumper to use `0x18`.
 
+**I2C robustness:** `Wire.setTimeOut(I2C_TIMEOUT_MS)` is set in `setup()` so a bus glitch
+(e.g. from LED PWM switching noise) fails a transaction fast instead of blocking `loop()`;
+a task watchdog (`esp_task_wdt`) is also armed as a backstop that reboots the device if
+`loop()` ever stalls regardless of cause. See the Timeout Audit & Watchdog section in
+`doc/firmware_architecture.md`.
+
 ---
 
-## config.h Additions
+## config.h Values
 
-```cpp
-// ── LIS3DH ────────────────────────────────────────────────────────────────────
-
-// I2C & interrupt pins
-#define LIS3DH_SDA_PIN       8       // I2C SDA
-#define LIS3DH_SCL_PIN       9       // I2C SCL
-#define LIS3DH_INT_PIN       3       // INT1 → deep sleep ext0 wakeup (replaces TOUCH_PIN)
-#define LIS3DH_I2C_ADDR      0x19    // Default; 0x18 if address jumper bridged
-
-// Axis enable (CLICK_CFG register 0x38)
-// Enable the axes that will respond to taps.
-// Bits: [-, -, ZD, ZS, YD, YS, XD, XS]
-//   ZD/YD/XD = double-tap enable per axis
-//   ZS/YS/XS = single-tap enable per axis
-// Z-axis up (lamp tapped from the top):   0x30  ← default
-// All axes (useful for debugging):        0x3F
-// X+Y only (accelerometer mounted flat):  0x0F
-#define LIS3DH_CLICK_CFG     0x30
-
-// Tap amplitude threshold (CLICK_THS register 0x3A)
-// 1 LSB = FS/128 = ~16 mg at FS=±2g (CTRL_REG4 default)
-// Range: 0x00–0x7F.  Start at 0x20 (~512 mg) and tune down if taps are missed.
-// Lower value = more sensitive. Too low = false triggers from vibration.
-#define LIS3DH_CLICK_THS     0x20
-
-// Output data rate (CTRL_REG1 0x20)
-// Sets time resolution of all timing registers (1 LSB = 1/ODR).
-// 0x57 = ODR 100 Hz, low-power mode, X+Y+Z enabled (~6 µA)
-// 0x5F = ODR 100 Hz, low-power mode, all axes  (same power, use if CLICK_CFG = 0x3F)
-// Change ODR only if timing values below need finer resolution (e.g. 0x67 for 200 Hz).
-#define LIS3DH_CTRL_REG1     0x57
-
-// Tap timing — all values in ODR ticks (1 tick = 1/ODR = 10 ms at 100 Hz)
-//
-// TIME_LIMIT (0x3B): maximum duration of a single tap impulse.
-// The acceleration must exceed the threshold and return below it within this window.
-// Too short → sharp taps rejected.  Too long → slow presses misread as taps.
-// 0x08 = 80 ms at 100 Hz  ← start here
-#define LIS3DH_TIME_LIMIT    0x08
-
-// TIME_LATENCY (0x3C): dead time after the first tap during which a second tap
-// is ignored.  Prevents the same physical impulse ringing into a false double-tap.
-// 0x10 = 160 ms at 100 Hz  ← start here
-#define LIS3DH_TIME_LATENCY  0x10
-
-// TIME_WINDOW (0x3D): window after TIME_LATENCY in which the second tap must arrive
-// for a double-tap to be recognised.
-// Total double-tap acceptance window = TIME_LATENCY + TIME_WINDOW.
-// 0x18 = 240 ms at 100 Hz → total window = 160 + 240 = 400 ms  ← start here
-#define LIS3DH_TIME_WINDOW   0x18
-```
-
-The existing `TOUCH_PIN` define is superseded by `LIS3DH_INT_PIN`. The other pin
-defines (`WHITE_LED_PIN`, `WARM_LED_PIN`, `BATTERY_PIN`) are unchanged.
+All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_CTRL_REG1`,
+timing registers, pins) live in `firmware/include/config.h` — that file is the source of
+truth; don't duplicate values here where they can drift out of sync. Current defaults use
+single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`) since the firmware no longer
+needs hardware or firmware double-tap discrimination — see Gesture Behaviour below.
 
 ---
 
 ## Gesture Behaviour
 
-### While OFF (deep sleep)
-
-Any tap — single or double — simply wakes the lamp and turns it on. No gesture
-discrimination is performed on wakeup. The act of tapping is the intent; which tap
-it was is irrelevant.
-
-Implementation: on wakeup from `LIS3DH_INT_PIN` (ext0), read and discard `CLICK_SRC`
-to clear the latched interrupt, then proceed straight to the ON state.
+The accelerometer plays no role while the lamp is OFF or asleep — it is not a deep-sleep
+wakeup source, and its interrupt line (`LIS3DH_INT_PIN`, now GPIO4) is independent of the
+button's wake pin (`BUTTON_PIN`, GPIO3).
 
 ### While ON (awake)
 
 | Gesture | Action |
 |---|---|
-| Single tap | Toggle off |
-| Double tap | Switch mode (warm ↔ cool) |
+| Tap on lamp body | Switch mode (warm ↔ cool) — same action as double-tapping the button |
 
-Because the hardware fires a single-tap interrupt immediately and a double-tap interrupt
-only after the full `TIME_LATENCY + TIME_WINDOW` period, the firmware must wait before
-acting. After `INT1` fires while the lamp is on:
+Any detected tap (`Sclick` bit in `CLICK_SRC`) immediately fires the mode-swap gesture —
+there's no single-vs-double discrimination to wait on, so no latency beyond reading the
+register. After dispatch, `LIS3DH_COOLDOWN_MS` (300 ms) suppresses re-triggers from the
+same tap's ring-down before the state machine re-arms.
 
-1. Wait `TIME_LATENCY + TIME_WINDOW` (≈ 400 ms with default values)
-2. Read `CLICK_SRC` (register `0x39`)
-3. If `Dtap` bit (bit 5) is set → switch mode
-4. Otherwise (`Stap` bit 4 only) → toggle off
-
-This introduces a ~400 ms latency on deliberate taps while the lamp is on, which is
-acceptable for a lamp. Reduce `TIME_WINDOW` to shorten it if needed.
+On/off, brightness, and the battery indicator are handled entirely by the physical button
+(`touch_input.cpp`) and never touch the accelerometer path.
 
 ---
 
@@ -170,15 +119,13 @@ bool double_tap  = (src >> 5) & 0x01;  // Dtap bit
 
 ## Power
 
-In power-down mode (ODR bits = `0000` in CTRL_REG1) the LIS3DH draws ~0.4 µA —
-lower than the TTP223's ~1.5 µA standby. However, the click detection engine is
-inactive in power-down mode; the lamp relies on deep sleep wakeup via the latched
-`INT1` from the last tap, so the chip should remain in its configured low-power ODR
-mode rather than powered-down while the system is asleep.
-
-At 100 Hz low-power mode, current draw is ~6 µA, replacing the TTP223's ~1.5 µA.
-The net change to the deep sleep budget is approximately **+4.5 µA**, bringing the
-estimated total from ~22.5 µA to ~27 µA — still comfortably negligible.
+The accelerometer is not involved in deep sleep wakeup (the button is the sole wake
+source), so it could in principle be powered down while the lamp sleeps. It is left in
+its configured 100 Hz low-power ODR mode (~6 µA) continuously instead, for simplicity —
+the click engine only needs to be live while the lamp is ON to catch a mode-swap tap, but
+there's no harm leaving it running through sleep too, and it avoids extra power-sequencing
+code. Net addition to the deep sleep budget vs. no accelerometer at all is ~6 µA, see the
+Power Management section in `doc/firmware_architecture.md`.
 
 ---
 

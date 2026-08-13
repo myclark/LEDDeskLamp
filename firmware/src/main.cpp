@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_sleep.h>
+#include <esp_task_wdt.h>
+#include <esp_idf_version.h>
 #include "config.h"
 #include "led_control.h"
 #include "touch_input.h"
@@ -116,16 +118,12 @@ static void debugClickSrc(uint8_t src) {
   DEBUG_PRINTLN("]");
 }
 
-// Non-blocking state machine: waits LIS3DH_DOUBLE_TAP_WAIT_MS after INT1 fires,
-// then reads CLICK_SRC to discriminate single vs double tap.
+// Non-blocking state machine. The accelerometer is now only an auxiliary trigger for the
+// mode-swap gesture (on/off/brightness/battery indicator all live on the physical button),
+// so there's no single-vs-double-tap discrimination to do any more: any detected tap swaps
+// the mode. A cooldown after dispatch suppresses ring-down re-triggers from the same tap.
 static void updateAccelInput() {
-  // Hardware double-tap discrimination is disabled (CLICK_CFG single-tap only).
-  // We read CLICK_SRC immediately on each INT1, then do tap counting in firmware:
-  //   IDLE          → INT1 fires (Sclick) → RING_SUPPRESS
-  //   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS (covers ring-down) → SECOND_TAP
-  //   SECOND_TAP    → INT1 fires again → double tap; or timeout → single tap
-  //   COOLDOWN      → wait LIS3DH_COOLDOWN_MS → IDLE
-  enum AccelState { IDLE, RING_SUPPRESS, SECOND_TAP, COOLDOWN };
+  enum AccelState { IDLE, COOLDOWN };
   static AccelState state = IDLE;
   static unsigned long stateStart = 0;
 
@@ -135,30 +133,9 @@ static void updateAccelInput() {
       DEBUG_PRINT("ACCEL: tap detected: ");
       debugClickSrc(src);
       if ((src >> 4) & 0x01) {  // Sclick
-        stateStart = millis();
-        state = RING_SUPPRESS;
-      } else {
-        DEBUG_PRINTLN("ACCEL: no Sclick — ignoring");
+        DEBUG_PRINTLN("ACCEL: tap → swap mode");
+        handleDoubleTap();
       }
-    }
-  } else if (state == RING_SUPPRESS) {
-    if (millis() - stateStart >= LIS3DH_RING_SUPPRESS_MS) {
-      DEBUG_PRINTLN("ACCEL: ring-down window passed — watching for second tap");
-      stateStart = millis();
-      state = SECOND_TAP;
-    }
-  } else if (state == SECOND_TAP) {
-    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
-      uint8_t src = accelReadClickSrc();
-      DEBUG_PRINT("ACCEL: second tap: ");
-      debugClickSrc(src);
-      DEBUG_PRINTLN("ACCEL: double tap → swap mode");
-      handleDoubleTap();
-      stateStart = millis();
-      state = COOLDOWN;
-    } else if (millis() - stateStart >= LIS3DH_SECOND_TAP_MS) {
-      DEBUG_PRINTLN("ACCEL: single tap → toggle on/off");
-      handleSingleTap();
       stateStart = millis();
       state = COOLDOWN;
     }
@@ -169,6 +146,33 @@ static void updateAccelInput() {
   }
 }
 #endif
+
+// Task watchdog: reboots the device if loop() ever fails to check in for
+// WATCHDOG_TIMEOUT_MS (e.g. an I2C bus lockup on the accelerometer link, or any
+// future bug that blocks the loop). The API shape changed between ESP-IDF 4 and 5
+// (Arduino core versions), so branch on the IDF major version to support both.
+static void initWatchdog() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WATCHDOG_TIMEOUT_MS,
+    .idle_core_mask = 0,
+    .trigger_panic = true
+  };
+  esp_err_t err = esp_task_wdt_init(&wdtConfig);
+  if (err == ESP_ERR_INVALID_STATE) {
+    // Framework already initialized the TWDT with its own defaults — apply ours instead.
+    esp_task_wdt_reconfigure(&wdtConfig);
+  }
+#else
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_MS / 1000, true);
+#endif
+
+  esp_err_t addErr = esp_task_wdt_add(NULL);  // Subscribe the loop task (current task)
+  if (addErr != ESP_OK && addErr != ESP_ERR_INVALID_STATE) {
+    DEBUG_PRINTLN("WARNING: failed to subscribe loop task to watchdog");
+  }
+  DEBUG_PRINTLN("Watchdog armed");
+}
 
 void setup() {
 #if DEBUG
@@ -192,22 +196,25 @@ void setup() {
   initTouch();
   initLED();
   initBatteryMonitor();
+  initWatchdog();
 
 #ifdef USE_ACCEL_INPUT
   Wire.begin(LIS3DH_SDA_PIN, LIS3DH_SCL_PIN);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);  // Bound I2C transactions so a bus glitch can't block loop()
   accelInit();
   accelDumpConfig();
+  // Flush any latched INT1 left over from before a reset/reflash so the first loop()
+  // iteration doesn't immediately read it as a fresh tap.
+  accelReadClickSrc();
 #endif
 
-  // Register callbacks
+  // Register callbacks — the physical button always drives the full gesture set.
   setSingleTapCallback(handleSingleTap);
   setDoubleTapCallback(handleDoubleTap);
   setTripleTapCallback(handleTripleTap);
-#ifndef USE_ACCEL_INPUT
   setLongPressStartCallback(handleLongPressStart);
   setLongPressHoldCallback(handleLongPressHold);
   setLongPressEndCallback(handleLongPressEnd);
-#endif
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     DEBUG_PRINTLN("Woke from deep sleep!");
@@ -216,13 +223,6 @@ void setup() {
     // Disable GPIO hold to allow PWM control again
     gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
     gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
-
-#ifdef USE_ACCEL_INPUT
-    // Clear latched INT1 — on wakeup any tap means "turn on", no discrimination needed
-    uint8_t wakeSrc = accelReadClickSrc();
-    DEBUG_PRINT("ACCEL: wakeup ");
-    debugClickSrc(wakeSrc);
-#endif
 
     // Restore saved mode and brightness
     turnOn(savedMode, *getModeBrightness(savedMode));
@@ -245,10 +245,10 @@ void setup() {
   }
 
   DEBUG_PRINTLN("Lamp ready");
-  DEBUG_PRINTLN("Single tap: toggle ON/OFF");
-  DEBUG_PRINTLN("Double tap: swap WARM/COOL");
-  DEBUG_PRINTLN("Long press: adjust brightness");
-  DEBUG_PRINTLN("Triple tap: battery indicator");
+  DEBUG_PRINTLN("Button single tap: toggle ON/OFF");
+  DEBUG_PRINTLN("Button double tap (or accel tap): swap WARM/COOL");
+  DEBUG_PRINTLN("Button long press: adjust brightness");
+  DEBUG_PRINTLN("Button triple tap: battery indicator");
   DEBUG_PRINT("Deep sleep after ");
   DEBUG_PRINT(DEEP_SLEEP_TIMEOUT_MS / 1000);
   DEBUG_PRINTLN("s in OFF state");
@@ -260,10 +260,9 @@ void setup() {
 }
 
 void loop() {
+  updateButton();
 #ifdef USE_ACCEL_INPUT
   updateAccelInput();
-#else
-  updateButton();
 #endif
   updateModeTransition();
   updateBatteryMonitor();
@@ -287,25 +286,34 @@ void loop() {
   }
 #endif
 
-  // Deep sleep timer: only when OFF and no indicator playing
+  // Deep sleep timer: only when OFF and no indicator playing.
+  // Uses an explicit "running" flag rather than treating offStateStartTime == 0 as
+  // "not started" — millis() legitimately returns 0 briefly after boot, which would
+  // otherwise make the timer think it needs to (re-)start forever at that instant.
   static unsigned long offStateStartTime = 0;
+  static bool offTimerRunning = false;
   if (currentLampState == OFF && !isPlayingIndicator()) {
-    if (offStateStartTime == 0) {
+    if (!offTimerRunning) {
       offStateStartTime = millis();
+      offTimerRunning = true;
       DEBUG_PRINTLN("OFF state - deep sleep timer started");
     } else if (millis() - offStateStartTime >= DEEP_SLEEP_TIMEOUT_MS) {
       enterDeepSleep();
     }
   } else {
-    offStateStartTime = 0;
+    offTimerRunning = false;
   }
+
+  // Pet the watchdog — if loop() ever fails to reach here within WATCHDOG_TIMEOUT_MS
+  // (e.g. an I2C hang), the device reboots instead of staying frozen.
+  esp_task_wdt_reset();
 
   delay(1);  // Minimal delay for smooth transitions
 }
 
 void enterDeepSleep() {
   DEBUG_PRINTLN("Entering deep sleep...");
-  DEBUG_PRINTLN("Touch button to wake");
+  DEBUG_PRINTLN("Press button to wake");
 
   // Ensure LEDs are completely off
   ledcWrite(0, 0);  // WHITE_LED_CHANNEL
@@ -321,8 +329,8 @@ void enterDeepSleep() {
   digitalWrite(WARM_LED_PIN, LOW);
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
 
-  // Configure wake on GPIO3 (TOUCH_PIN) going HIGH
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+  // Configure wake on BUTTON_PIN going HIGH (accelerometer is not a wake source)
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
 
   delay(100);  // Allow serial to flush
   esp_deep_sleep_start();
