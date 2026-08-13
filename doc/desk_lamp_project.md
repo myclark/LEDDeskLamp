@@ -43,10 +43,12 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
     linear, not audio/log taper, since brightness mapping is a straight linear function of
     ADC reading
   - **Physical momentary pushbutton** (normally-open) — compile-time alternative; both share
-    the same GPIO (GPIO3), only one is ever wired up
-- **LIS3DH accelerometer module** (e.g. SparkFun SEN-13963) — auxiliary double/triple-tap
-  mode-swap (WARM ↔ COOL) gesture in both input modes; also the sole deep-sleep wake source
-  when the potentiometer is in use (required there, optional in button mode)
+    the same GPIO (GPIO4, chosen because it was free — GPIO3 is already hardwired to the
+    accelerometer on the existing board), only one is ever wired up
+- **LIS3DH accelerometer module** (e.g. SparkFun SEN-13963) — already wired (GPIO3), unchanged
+  by this work; auxiliary double/triple-tap mode-swap (WARM ↔ COOL) gesture in both input
+  modes; also the sole deep-sleep wake source when the potentiometer is in use (required
+  there, optional in button mode)
 
 ### Switching and Control
 - **2× N-channel MOSFETs** (TO-92 package for through-hole)
@@ -103,13 +105,13 @@ graph TB
     POT --> |"Wiper"| POT_R["1kΩ series R"]
     POT_R --> POT_NODE[POT_PIN Node]
     POT_NODE --> |"1µF to GND"| GND_RAIL
-    POT_NODE --> GPIO3[GPIO3 ADC]
+    POT_NODE --> GPIO4[GPIO4 ADC]
 
     ESP32_CORE --> |"I2C SDA"| GPIO8[GPIO8]
     ESP32_CORE --> |"I2C SCL"| GPIO9[GPIO9]
     GPIO8 --> LIS3DH[LIS3DH Accelerometer]
     GPIO9 --> LIS3DH
-    LIS3DH --> |"INT1"| GPIO4[GPIO4 Interrupt<br/>+ deep sleep wake]
+    LIS3DH --> |"INT1 (already wired,<br/>unchanged)"| GPIO3[GPIO3 Interrupt<br/>+ deep sleep wake]
 
     ESP32_CORE --> GPIO10[GPIO10 PWM]
     ESP32_CORE --> GPIO5[GPIO5 PWM]
@@ -194,9 +196,10 @@ graph TB
               │   │  GND                                         │
               │   │                                              │
               │   │  GPIO1  ──► pot power switch (pot mode)   ───┼──► see Potentiometer Detail
-              │   │  GPIO3  ◄── pot wiper / physical button   ───┼──► see Potentiometer Detail /
+              │   │  GPIO4  ◄── pot wiper / physical button   ───┼──► see Potentiometer Detail /
               │   │                                              │    Button Mode Alternative
-              │   │  GPIO4  ◄── LIS3DH INT1                   ───┼──► see Accelerometer Detail
+              │   │  GPIO3  ◄── LIS3DH INT1 (already wired,   ───┼──► see Accelerometer Detail
+              │   │            unchanged by this work)           │
               │   │  GPIO8  ── I2C SDA                        ───┼──► see Accelerometer Detail
               │   │  GPIO9  ── I2C SCL                        ───┼──► see Accelerometer Detail
               │   │  GPIO10 ──┐                                  │
@@ -235,14 +238,14 @@ Potentiometer Detail (pot mode, USE_POT_INPUT defined — default):
                   │
   GND ────────────┴── Pot Terminal 2
 
-  Wiper ──[1kΩ]──┬── GPIO3 (POT_PIN, ADC)
-                  │
+  Wiper ──[1kΩ]──┬── GPIO4 (POT_PIN, ADC)  — free pin; GPIO3 is already the LIS3DH's,
+                  │                          deliberately not reused here
                 [1µF]
                   │
                  GND
 
 Button Mode Alternative (USE_POT_INPUT commented out in config.h):
-  3.3V ──[Button]──┬── GPIO3 (BUTTON_PIN)
+  3.3V ──[Button]──┬── GPIO4 (BUTTON_PIN)
                     │
                   [10kΩ]
                     │
@@ -253,7 +256,9 @@ Button Mode Alternative (USE_POT_INPUT commented out in config.h):
 Accelerometer Detail (mode-swap gesture, LIS3DH — both input modes):
   GPIO8 (SDA) ──────── LIS3DH SDA
   GPIO9 (SCL) ──────── LIS3DH SCL
-  GPIO4       ◄─────── LIS3DH INT1   (also the deep-sleep wake pin in pot mode only)
+  GPIO3       ◄─────── LIS3DH INT1   (also the deep-sleep wake pin in pot mode only —
+                                       already wired here from before the pot/button
+                                       work, unchanged by it)
   3.3V        ──────── LIS3DH VCC
   GND         ──────── LIS3DH GND
 
@@ -315,8 +320,10 @@ float voltage = adcValue * (3.3 / 4095.0) * (122.0 / 22.0);  // Scaling factor =
 ### Primary Input: Potentiometer or Button
 
 `USE_POT_INPUT` in `config.h` selects exactly one primary control at compile time; both
-share GPIO3 since only one is ever physically wired up. Full detail (mapping, hysteresis,
-noise filtering, timing) is in `doc/firmware_architecture.md` — this is the summary.
+share GPIO4 since only one is ever physically wired up (GPIO4 was free on the existing
+board; GPIO3 is already the LIS3DH's INT1 and is deliberately not reused). Full detail
+(mapping, hysteresis, noise filtering, timing) is in `doc/firmware_architecture.md` — this
+is the summary.
 
 **Potentiometer (default):** a live, continuously-polled analog control, not a discrete
 gesture. The pot's position directly maps to brightness; turning it to/below a threshold
@@ -463,8 +470,10 @@ The firmware is organised into five hardware modules plus main (see
 `doc/firmware_architecture.md` for full implementation detail — this is the summary):
 
 **config.h** - Centralised configuration:
-- Pin definitions: GPIO3 (`POT_PIN`/`BUTTON_PIN`, shared), GPIO1 (`POT_POWER_PIN`), GPIO4
-  (LIS3DH interrupt), GPIO10/GPIO5 (LED PWM), GPIO0 (battery ADC), GPIO8/GPIO9 (I2C)
+- Pin definitions: GPIO4 (`POT_PIN`/`BUTTON_PIN`, shared, newly added), GPIO1
+  (`POT_POWER_PIN`, newly added), GPIO3 (LIS3DH interrupt — already wired, unchanged),
+  GPIO10/GPIO5 (LED PWM — already wired), GPIO0 (battery ADC — already wired), GPIO8/GPIO9
+  (I2C — already wired)
 - Timing constants (debounce, long press, transitions, deep sleep timeout, watchdog timeout)
 - Brightness settings (max, min PWM, gamma correction value, pot brightness slew)
 - Battery calibration factors (ADC correction, BMS voltage drop)
@@ -687,7 +696,11 @@ Even though wireless features aren't initially needed:
 - **v2.0** - Potentiometer input, accelerometer mode-swap gesture, task watchdog (major
   input hardware redesign — not yet flashed to real hardware, see Testing Checklist):
   - Replaced the TTP223 capacitive touch module with a compile-time choice of a
-    potentiometer (new default) or a physical momentary button, sharing GPIO3
+    potentiometer (new default) or a physical momentary button, sharing GPIO4 — a
+    genuinely free pin on the existing board. This is a running physical system, and the
+    LIS3DH's INT1 is already hardwired to GPIO3 (having taken over that pin from the old
+    touch module before this branch started); the new pot/button input deliberately does
+    not reuse it, leaving that connection untouched
   - Potentiometer mode: live continuous brightness tracking (no persisted brightness),
     on/off hysteresis and a top dead zone, two independent noise filters (input-side
     exponential smoothing in `pot_input.cpp`, output-side brightness slew in

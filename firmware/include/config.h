@@ -18,13 +18,20 @@
 #endif
 
 // Pin definitions
+// This is a running physical build — GPIO3/5/8/9/10/0 are already hardwired (touch/accel
+// INT, warm LED, I2C SDA/SCL, white LED, battery ADC respectively) and MUST NOT be
+// reassigned. New components (pot, button) only ever go on genuinely free pins.
+//
 // BUTTON_PIN and POT_PIN are the same physical GPIO — only one is actually wired up,
-// matching whichever primary input mode is selected below (see USE_POT_INPUT).
+// matching whichever primary input mode is selected below (see USE_POT_INPUT). GPIO4 was
+// free on the existing board (unused in the pre-pot/button design), so that's where both
+// go — NOT GPIO3, which is already the LIS3DH's INT1 line (see LIS3DH_INT_PIN below) and
+// stays there unchanged.
 //
 // BUTTON_PIN: physical momentary button. Wire the button between BUTTON_PIN and 3.3V,
 // with an external ~10kΩ pull-down resistor from BUTTON_PIN to GND. Idle = LOW, pressed = HIGH.
 // (Same active-HIGH polarity as the old TTP223 module, so touch_input.cpp needs no changes.)
-#define BUTTON_PIN 3         // Physical button input; also the deep-sleep wake pin (button mode)
+#define BUTTON_PIN 4         // Physical button input; also the deep-sleep wake pin (button mode)
 //
 // POT_PIN: potentiometer wiper. Wire one outer leg to POT_POWER_PIN (below, NOT the fixed
 // 3.3V rail) and the other to GND; wiper to POT_PIN (ADC1-capable). Fully counter-clockwise
@@ -42,7 +49,7 @@
 //     below the 5kHz LED PWM frequency (knocks that noise source down significantly).
 //     Keeps total source impedance (pot's own ~2.5kΩ worst case + this 1kΩ) comfortably
 //     under the ESP32 ADC's recommended limit for accurate 12-bit reads.
-#define POT_PIN 3            // Potentiometer wiper input (pot mode)
+#define POT_PIN 4            // Potentiometer wiper input (pot mode)
 //
 // POT_POWER_PIN: powers the pot's divider directly from a GPIO instead of the fixed 3.3V
 // rail, so it can be switched off during deep sleep — without it, a 10kΩ pot left wired
@@ -52,19 +59,22 @@
 // sourcing capability (tens of mA) — driving the pin HIGH is electrically indistinguishable
 // from tying it to the 3.3V rail at this current level. Must be an RTC-capable pin (0-5 on
 // ESP32-C3) so gpio_hold_en()/gpio_hold_dis() can latch it LOW through sleep, same pattern
-// already used for the LED pins in enterDeepSleep(). GPIO1 is the only one of 0-5 not
-// otherwise spoken for (0=battery ADC, 2=strapping/avoid, 3=POT_PIN, 4=LIS3DH INT, 5=warm LED).
+// already used for the LED pins in enterDeepSleep(). GPIO1 is free and RTC-capable — the
+// only other unclaimed pin in that range once 0/3/4/5 (battery/LIS3DH INT/pot-button/warm
+// LED) are accounted for; 2 is a strapping pin and avoided per project convention.
 #define POT_POWER_PIN 1      // Switched power for the pot divider (pot mode only)
 // Settle time after powering the pot back on (wake or cold boot) before the first reading
 // is trusted — must clear the RC front end's worst-case settling time (~5x its ~3.5ms time
 // constant ≈ 17.5ms); comfortable margin above that.
 #define POT_SETTLE_MS 25
-#define WHITE_LED_PIN 10    // White LED control (PWM)
-#define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
-#define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
-#define LIS3DH_SDA_PIN 8    // LIS3DH I2C data
-#define LIS3DH_SCL_PIN 9    // LIS3DH I2C clock (GPIO9 is a strapping pin, but open-drain I2C is safe after reset)
-#define LIS3DH_INT_PIN 4    // LIS3DH INT1 — separate pin from BUTTON_PIN/POT_PIN which own GPIO3
+#define WHITE_LED_PIN 10    // White LED control (PWM) — already wired, do not reassign
+#define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin) — already wired, do not reassign
+#define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0) — already wired, do not reassign
+#define LIS3DH_SDA_PIN 8    // LIS3DH I2C data — already wired, do not reassign
+#define LIS3DH_SCL_PIN 9    // LIS3DH I2C clock (GPIO9 is a strapping pin, but open-drain I2C is safe after reset) — already wired, do not reassign
+#define LIS3DH_INT_PIN 3    // LIS3DH INT1 — already wired here (this is the pin the old TOUCH_PIN
+                            // used to share with it); unchanged by the pot/button addition.
+                            // BUTTON_PIN/POT_PIN deliberately do NOT use this pin any more.
 
 // Battery voltage calibration
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
