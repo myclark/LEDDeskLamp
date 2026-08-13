@@ -155,7 +155,10 @@ static void updatePotControl() {
       enterDeepSleep();
     }
 
-    turnOn(savedMode, target);
+    // Ramp up via the brightness slew (see turnOnAtZero()) instead of turnOn()'s fixed
+    // crossfade, matching the "eased with BRIGHTNESS_SLEW_TIME_CONSTANT_MS" pot on-transition
+    // documented in config.h.
+    turnOnAtZero(savedMode);
     setBrightnessTarget(target);
 
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
@@ -209,17 +212,19 @@ static void updateAccelInput() {
   enum AccelState { IDLE, RING_SUPPRESS, WAITING };
   static AccelState state = IDLE;
   static uint8_t tapCount = 0;
-  static unsigned long lastTapTime = 0;
   static unsigned long suppressStart = 0;
+  static unsigned long waitingStartTime = 0;
 
   if (state == RING_SUPPRESS) {
     if (millis() - suppressStart >= LIS3DH_RING_SUPPRESS_MS) {
       state = WAITING;
+      waitingStartTime = millis();  // Window is timed from here, not from the tap itself —
+                                     // LIS3DH_RING_SUPPRESS_MS already elapsed by this point.
     }
     return;  // Ignore INT1 entirely while suppressing this tap's ring-down
   }
 
-  if (state == WAITING && millis() - lastTapTime >= LIS3DH_GESTURE_WINDOW_MS) {
+  if (state == WAITING && millis() - waitingStartTime >= LIS3DH_GESTURE_WINDOW_MS) {
     if (tapCount == ACCEL_MODE_SWAP_TAP_COUNT) {
       DEBUG_PRINTLN("ACCEL: tap gesture → swap mode");
       handleModeSwap();
@@ -238,7 +243,6 @@ static void updateAccelInput() {
     debugClickSrc(src);
     if ((src >> 4) & 0x01) {  // Sclick
       tapCount++;
-      lastTapTime = millis();
       suppressStart = millis();
       state = RING_SUPPRESS;
     }
@@ -349,7 +353,7 @@ void setup() {
     if (isPotRequestingOn()) {
       lastInteractionTime = millis();
       uint8_t target = getPotBrightnessTarget();
-      turnOn(savedMode, target);
+      turnOnAtZero(savedMode);
       setBrightnessTarget(target);
 
       readBatteryVoltage();

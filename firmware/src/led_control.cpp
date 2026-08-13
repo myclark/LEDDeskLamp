@@ -109,6 +109,30 @@ void turnOn(uint8_t mode, uint8_t brightnessLevel) {
   DEBUG_PRINTLN(brightnessLevel);
 }
 
+void turnOnAtZero(uint8_t mode) {
+  if (currentLampState == OFF) {
+    ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
+    ledcAttachPin(WARM_LED_PIN, WARM_LED_CHANNEL);
+    DEBUG_PRINTLN("Transitioning from OFF: PWM re-attached");
+  }
+
+  currentLampState = ON;
+  currentMode = mode;
+  brightness = 0;
+
+  currentWhitePWM = 0;
+  currentWarmPWM = 0;
+  targetWhitePWM = 0;
+  targetWarmPWM = 0;
+  isTransitioning = false;  // Nothing to crossfade from 0 to 0 — caller ramps via slew instead
+
+  ledcWrite(WHITE_LED_CHANNEL, 0);
+  ledcWrite(WARM_LED_CHANNEL, 0);
+
+  DEBUG_PRINT("ON (at zero, ramping via slew): mode=");
+  DEBUG_PRINTLN(mode == MODE_COOL ? "COOL" : "WARM");
+}
+
 void turnOff() {
   currentLampState = OFF;
   targetWhitePWM = 0;

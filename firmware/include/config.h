@@ -94,7 +94,7 @@
 // Exponential smoothing time constant for live brightness tracking (potentiometer mode).
 // Larger = slower, dreamier follow; smaller = snappier/more direct. At this time constant,
 // brightness reaches ~95% of a new target after roughly 3x this value in ms.
-#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 150
+#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 1000
 
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
@@ -239,9 +239,12 @@
                                     // window, making every tap look like a Dclick) — the
                                     // double/triple-tap gesture below is counted in firmware
                                     // from single-tap (Sclick) events instead.
-#define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold
+#define LIS3DH_CLICK_THS     0x10   // ~256 mg threshold — hardware-verified during bring-up
+                                    // (commit bbe2f1b); 0x20 is too insensitive to register
+                                    // real taps on this enclosure.
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
-#define LIS3DH_TIME_LIMIT    0x06   // 60 ms max tap impulse window — filters slow movement transients
+#define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window — physical enclosures ring
+                                    // longer than 60ms; a shorter window rejects real taps.
 #define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap (unused: hardware
                                     // double-tap detection is disabled, see LIS3DH_CLICK_CFG)
 #define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window (unused, same reason)
