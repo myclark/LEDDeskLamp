@@ -5,13 +5,13 @@ Detailed implementation notes for the ESP32-C3 desk lamp firmware.
 ## Primary Input: Potentiometer or Button
 
 `config.h`'s `USE_POT_INPUT` selects exactly one primary control for on/off + brightness.
-Both options share the same physical GPIO (`POT_PIN`/`BUTTON_PIN`, both GPIO4) since only
-one is ever wired up at a time. GPIO4 was chosen because it was genuinely free on the
-existing board — this is a running physical build, and GPIO3 (the pin the old capacitive
-touch module used to share with the LIS3DH's INT1) is already hardwired to the
-accelerometer alone at this point, so the new pot/button input deliberately does not reuse
-it. The accelerometer's role (mode-swap gesture) is the same either way — see the next
-section.
+Both options share the same physical GPIO (`POT_PIN`/`BUTTON_PIN`, both GPIO1) since only
+one is ever wired up at a time. GPIO1 was chosen because it was genuinely free on the
+existing board and physically accessible — this is a running physical build, and GPIO3
+(the pin the old capacitive touch module used to share with the LIS3DH's INT1) is already
+hardwired to the accelerometer alone at this point, so the new pot/button input
+deliberately does not reuse it. The accelerometer's role (mode-swap gesture) is the same
+either way — see the next section.
 
 ### Potentiometer mode (`USE_POT_INPUT` defined — the default)
 
@@ -66,11 +66,11 @@ Analog complement to the digital filtering above — see the `POT_PIN`/`POT_POWE
 comments in `config.h` for the same values inline with the pinout.
 
 ```
-POT_POWER_PIN (GPIO1) ──┬──────────────┐
+POT_POWER_PIN (GPIO4) ──┬──────────────┐
                          │              │
                        [ POT ]          │
                          │              │
-                 wiper ──┴──[ R 1kΩ ]──┬──► POT_PIN (GPIO4)
+                 wiper ──┴──[ R 1kΩ ]──┬──► POT_PIN (GPIO1)
                                         │
                                       [ C 1µF ]
                                         │

@@ -32,9 +32,9 @@ depends on which mode is active:
 The board has I2C pull-ups fitted by default (jumper closed). GPIO3 is where the
 accelerometer's INT1 has always been wired — this predates the pot/button work and is
 unchanged by it. The new primary on/off control (`POT_PIN`/`BUTTON_PIN`) deliberately does
-*not* reuse this pin; it goes on GPIO4, which was free on the existing board (see
-`doc/firmware_architecture.md`). This is a running physical build, so GPIO3 must not be
-reassigned regardless of what past documentation revisions said.
+*not* reuse this pin; it goes on GPIO1, which was free on the existing board and physically
+accessible (see `doc/firmware_architecture.md`). This is a running physical build, so
+GPIO3 must not be reassigned regardless of what past documentation revisions said.
 
 **I2C address:** `0x19` by default. Bridge the bottom address jumper to use `0x18`.
 
@@ -93,7 +93,7 @@ modes — there's no accelerometer gesture for it.
 ### While OFF or asleep
 
 **Button mode:** the accelerometer plays no role at all — its interrupt line
-(`LIS3DH_INT_PIN`, GPIO3) is independent of the button's wake pin (`BUTTON_PIN`, GPIO4), and
+(`LIS3DH_INT_PIN`, GPIO3) is independent of the button's wake pin (`BUTTON_PIN`, GPIO1), and
 `updateAccelInput()` ignores taps whenever `currentLampState != ON` (mode-swap is a no-op
 while OFF, same as double-tapping the button while OFF).
 

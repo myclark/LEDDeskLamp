@@ -23,15 +23,15 @@
 // reassigned. New components (pot, button) only ever go on genuinely free pins.
 //
 // BUTTON_PIN and POT_PIN are the same physical GPIO — only one is actually wired up,
-// matching whichever primary input mode is selected below (see USE_POT_INPUT). GPIO4 was
-// free on the existing board (unused in the pre-pot/button design), so that's where both
-// go — NOT GPIO3, which is already the LIS3DH's INT1 line (see LIS3DH_INT_PIN below) and
+// matching whichever primary input mode is selected below (see USE_POT_INPUT). GPIO1 was
+// free on the existing board and is a physically accessible pin for the wiper/button wire
+// — NOT GPIO3, which is already the LIS3DH's INT1 line (see LIS3DH_INT_PIN below) and
 // stays there unchanged.
 //
 // BUTTON_PIN: physical momentary button. Wire the button between BUTTON_PIN and 3.3V,
 // with an external ~10kΩ pull-down resistor from BUTTON_PIN to GND. Idle = LOW, pressed = HIGH.
 // (Same active-HIGH polarity as the old TTP223 module, so touch_input.cpp needs no changes.)
-#define BUTTON_PIN 4         // Physical button input; also the deep-sleep wake pin (button mode)
+#define BUTTON_PIN 1         // Physical button input; also the deep-sleep wake pin (button mode)
 //
 // POT_PIN: potentiometer wiper. Wire one outer leg to POT_POWER_PIN (below, NOT the fixed
 // 3.3V rail) and the other to GND; wiper to POT_PIN (ADC1-capable). Fully counter-clockwise
@@ -49,7 +49,7 @@
 //     below the 5kHz LED PWM frequency (knocks that noise source down significantly).
 //     Keeps total source impedance (pot's own ~2.5kΩ worst case + this 1kΩ) comfortably
 //     under the ESP32 ADC's recommended limit for accurate 12-bit reads.
-#define POT_PIN 4            // Potentiometer wiper input (pot mode)
+#define POT_PIN 1            // Potentiometer wiper input (pot mode)
 //
 // POT_POWER_PIN: powers the pot's divider directly from a GPIO instead of the fixed 3.3V
 // rail, so it can be switched off during deep sleep — without it, a 10kΩ pot left wired
@@ -59,10 +59,12 @@
 // sourcing capability (tens of mA) — driving the pin HIGH is electrically indistinguishable
 // from tying it to the 3.3V rail at this current level. Must be an RTC-capable pin (0-5 on
 // ESP32-C3) so gpio_hold_en()/gpio_hold_dis() can latch it LOW through sleep, same pattern
-// already used for the LED pins in enterDeepSleep(). GPIO1 is free and RTC-capable — the
-// only other unclaimed pin in that range once 0/3/4/5 (battery/LIS3DH INT/pot-button/warm
-// LED) are accounted for; 2 is a strapping pin and avoided per project convention.
-#define POT_POWER_PIN 1      // Switched power for the pot divider (pot mode only)
+// already used for the LED pins in enterDeepSleep(). GPIO4 is free and RTC-capable — the
+// only other unclaimed pin in that range once 0/1/3/5 (battery/pot-button/LIS3DH INT/warm
+// LED) are accounted for; 2 is a strapping pin and avoided per project convention. This
+// wire only ever connects to one leg of the pot, so it doesn't need to be as physically
+// accessible as POT_PIN/BUTTON_PIN above.
+#define POT_POWER_PIN 4      // Switched power for the pot divider (pot mode only)
 // Settle time after powering the pot back on (wake or cold boot) before the first reading
 // is trusted — must clear the RC front end's worst-case settling time (~5x its ~3.5ms time
 // constant ≈ 17.5ms); comfortable margin above that.
