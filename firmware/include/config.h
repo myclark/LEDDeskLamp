@@ -233,14 +233,23 @@
 #define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap (unused: hardware
                                     // double-tap detection is disabled, see LIS3DH_CLICK_CFG)
 #define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window (unused, same reason)
-// Firmware-side multi-tap gesture (see updateAccelInput() in main.cpp): mode swap requires
-// a double or triple tap so an incidental bump — turning the pot knob shakes the enclosure
-// the accelerometer is mounted to — can't trigger it by itself.
+// Firmware-side multi-tap gesture (see updateAccelInput() in main.cpp): a single tap is
+// always an incidental bump and ignored (turning the pot knob shakes the enclosure the
+// accelerometer is mounted to). Mode swap fires on an *exact* tap count, not "2 or more" —
+// this leaves the other of {double, triple} tap free for a future gesture without needing
+// new hardware. Must be 2 or 3: 1 is reserved as the incidental-bump filter, and higher
+// counts get progressively harder for a user to land deliberately.
+#define ACCEL_MODE_SWAP_TAP_COUNT 2   // 2 = double tap swaps mode, triple tap is unused/free
+                                      // 3 = triple tap swaps mode, double tap is unused/free
+#if ACCEL_MODE_SWAP_TAP_COUNT < 2 || ACCEL_MODE_SWAP_TAP_COUNT > 3
+#error "ACCEL_MODE_SWAP_TAP_COUNT must be 2 or 3 — a single tap must stay reserved as the incidental-bump filter (see doc/accel_input_integration.md)."
+#endif
 // Dead time after each detected tap to absorb that tap's own ring-down before watching for
 // the next one in the sequence.
 #define LIS3DH_RING_SUPPRESS_MS   300
-// Window after ring-down closes to catch the next tap; if it passes with only one tap
-// counted, the gesture is discarded as incidental rather than swapping the mode.
+// Window after ring-down closes to catch the next tap; if it passes without exactly
+// ACCEL_MODE_SWAP_TAP_COUNT taps counted, the gesture is discarded rather than swapping
+// the mode — including if the count overshoots (e.g. a stray extra tap during a double).
 #define LIS3DH_GESTURE_WINDOW_MS  250
 
 #endif // CONFIG_H

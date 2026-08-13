@@ -334,12 +334,16 @@ shows the battery indicator. The button itself is the deep-sleep wake source in 
 ### Accelerometer Mode-Swap Gesture
 
 The LIS3DH is an auxiliary input in both modes, used only to swap WARM ↔ COOL. It requires
-a **double or triple tap** — a single tap is deliberately ignored, since in pot mode
-especially the accelerometer is mounted to the same enclosure the user's hand is on
-constantly while turning the dial; treating every tap as a mode swap would mean ordinary
-brightness adjustment randomly flipped the color mode. Firmware counts taps within a short
-window (see `doc/accel_input_integration.md`) and only dispatches the swap once 2 or more
-are seen; a lone tap times out and is discarded as incidental.
+an **exact** tap count (`ACCEL_MODE_SWAP_TAP_COUNT` in `config.h`, default 2 — double tap),
+not "2 or more": a single tap is always ignored, since in pot mode especially the
+accelerometer is mounted to the same enclosure the user's hand is on constantly while
+turning the dial — treating every tap as a mode swap would mean ordinary brightness
+adjustment randomly flipped the color mode. Requiring an exact count (rather than a
+threshold) also reserves the *other* of {double, triple} tap for a future gesture without
+needing new hardware — set `ACCEL_MODE_SWAP_TAP_COUNT` to 3 to swap which one drives the
+mode swap. Firmware counts taps within a short window (see
+`doc/accel_input_integration.md`) and only dispatches the swap when the count matches
+exactly; a lone tap or an overshoot both time out and are discarded.
 
 ## State Machine Design
 
@@ -373,8 +377,8 @@ the button uses the original tap/hold gesture model.
         │  Mode: WARM or COOL │── Pot to/below off-  ─┘
         │  (remembers last)   │   threshold, or
         │                     │   button single tap
-        │  Double/triple tap on lamp body (either     │
-        │    mode) → swap WARM↔COOL (crossfade)       │
+        │  Exact-count tap on lamp body (either mode,  │
+        │    default double) → swap WARM↔COOL          │
         │  Pot mode: brightness tracks pot position   │
         │    live (eased ramp)                        │
         │  Button mode: long press → adjust brightness│
@@ -412,8 +416,9 @@ staying frozen indefinitely. See Software Architecture below.
 - Button mode: single tap turns off (smooth crossfade to 0); long press (>800ms) adjusts
   brightness continuously (gamma corrected, direction reverses on release, double flash at
   min/max boundary); triple tap plays the non-blocking battery level pulse indicator
-- Double or triple tap on the lamp body (accelerometer, both modes): swap WARM↔COOL with
-  crossfade. A single tap is ignored — see Accelerometer Mode-Swap Gesture above
+- Tapping the lamp body exactly `ACCEL_MODE_SWAP_TAP_COUNT` times (accelerometer, both
+  modes, default 2 = double tap): swap WARM↔COOL with crossfade. Any other count, including
+  a single tap, is ignored — see Accelerometer Mode-Swap Gesture above
 - Auto battery indicator on turn-on when battery is LOW or CRITICAL, both modes, then
   recurring periodically for as long as the lamp stays ON and the battery stays that way
   (immediately again if it gets worse) — see Battery Indicator Pulse below. In button
@@ -679,6 +684,16 @@ Even though wireless features aren't initially needed:
 
 ## Document Revision History
 
+- **v2.2** - Accelerometer mode-swap gesture now requires an exact tap count:
+  - Previously any count of 2 or more taps swapped the mode ("double *or* triple"). Now
+    exactly `ACCEL_MODE_SWAP_TAP_COUNT` (config.h, default 2) is required — an overshoot is
+    discarded just like an undershoot, not treated as a match
+  - This reserves the *other* of {double, triple} tap completely free for a future gesture,
+    without needing new hardware — just flip the config value
+  - `config.h` rejects values outside {2, 3} at compile time (1 must stay reserved as the
+    incidental-bump filter)
+  - Renamed `handleDoubleTap()` → `handleModeSwap()` in `main.cpp`, since "double tap" was
+    no longer an accurate name once the accelerometer's trigger count became configurable
 - **v2.1** - Recurring low-battery reminder while ON:
   - The battery indicator no longer plays once at turn-on/wake and stops — it now repeats
     while the lamp stays ON: immediately if the battery state worsens (e.g. LOW → CRITICAL),

@@ -52,9 +52,9 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 | Input | OFF | ON |
 |-------|-----|----|
 | Turn pot | Turning above the on-threshold turns on at that brightness | Brightness tracks pot position live (eased ramp); turning to/below the off-threshold turns off |
-| Double/triple tap lamp body (accelerometer) | No effect | Swap WARM ↔ COOL (crossfade) |
+| Tap lamp body `ACCEL_MODE_SWAP_TAP_COUNT` times (accelerometer, default 2 = double tap) | No effect | Swap WARM ↔ COOL (crossfade) |
 
-A single tap on the lamp body is deliberately ignored (not just while OFF) — turning the pot knob shakes the same enclosure the accelerometer is mounted to, so requiring 2+ taps within the gesture window keeps ordinary brightness adjustment from randomly swapping modes.
+Any other tap count on the lamp body, including a single tap, is ignored — not just while OFF. This is an exact match, not "2 or more": turning the pot knob shakes the same enclosure the accelerometer is mounted to, so requiring an exact count keeps ordinary brightness adjustment from randomly swapping modes, and deliberately leaves the *other* of {double, triple} tap free for a future gesture (`ACCEL_MODE_SWAP_TAP_COUNT` in `config.h`, must be 2 or 3).
 
 Brightness is never persisted — it's always just wherever the pot currently points. Battery indicator shows automatically on wake/turn-on when LOW/CRITICAL, then recurs periodically while ON (`BATTERY_INDICATOR_REPEAT_LOW_MS`/`_CRITICAL_MS`, immediately again if it gets worse); there's no on-demand gesture for it.
 
@@ -67,7 +67,7 @@ Brightness is never persisted — it's always just wherever the pot currently po
 | Long press | — | Adjust brightness (direction reverses on release) |
 | Triple tap | — | Show battery level pulse |
 
-A double or triple tap on the lamp body (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only; a single tap is ignored.
+Tapping the lamp body `ACCEL_MODE_SWAP_TAP_COUNT` times (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only; any other count, including a single tap, is ignored.
 
 Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (60 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer.
 
@@ -90,6 +90,7 @@ Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then de
 #define POT_MAX_DEADZONE 8           // Pot mode: snaps to MAX_BRIGHTNESS within this margin of full scale
 #define BATTERY_INDICATOR_REPEAT_LOW_MS      (20UL*60*1000)  // Recurring reminder while ON + LOW
 #define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL*60*1000)   // Recurring reminder while ON + CRITICAL
+#define ACCEL_MODE_SWAP_TAP_COUNT 2  // Exact tap count that swaps mode (2 or 3); the other is free for a future gesture
 ```
 
 Battery thresholds (`BATTERY_LOW_THRESHOLD`, `BATTERY_CRITICAL_THRESHOLD`, etc.) and all pulse animation params are also in `config.h`.

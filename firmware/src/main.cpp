@@ -75,9 +75,12 @@ void handleSingleTap() {
   }
 }
 
-// Callback: double tap (button) or accelerometer tap — swap warm/cool (ignored when OFF)
-void handleDoubleTap() {
-  DEBUG_PRINTLN(">>> DOUBLE TAP / ACCEL TAP: swap mode");
+// Callback: button double tap, or the configured accelerometer tap count — swap warm/cool
+// (ignored when OFF). Named for what it does rather than "double tap" specifically, since
+// the accelerometer's trigger count is configurable (ACCEL_MODE_SWAP_TAP_COUNT) and may not
+// be two.
+void handleModeSwap() {
+  DEBUG_PRINTLN(">>> MODE SWAP (button double tap or configured accel tap count)");
   lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
@@ -190,17 +193,18 @@ static void debugClickSrc(uint8_t src) {
   DEBUG_PRINTLN("]");
 }
 
-// Non-blocking state machine. Mode swap requires a double- or triple-tap — a single tap is
-// deliberately ignored, since the lamp body gets bumped constantly during ordinary use (in
-// pot mode especially: turning the knob shakes the enclosure the accelerometer is mounted
-// to). Counting to at least 2 before dispatching turns those incidental knocks into no-ops
-// while still recognizing an intentional multi-tap gesture.
+// Non-blocking state machine. Mode swap requires an *exact* ACCEL_MODE_SWAP_TAP_COUNT taps
+// (2 or 3, config.h) — not "2 or more" — so the other of {double, triple} tap stays free for
+// a future gesture. A single tap is always ignored regardless of the configured count, since
+// the lamp body gets bumped constantly during ordinary use (in pot mode especially: turning
+// the knob shakes the enclosure the accelerometer is mounted to).
 //
 //   IDLE/WAITING  → INT1 fires (Sclick) → tapCount++, RING_SUPPRESS (absorb this tap's ringing)
 //   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS → WAITING (watch for the next tap)
 //   WAITING       → another tap arrives → back to RING_SUPPRESS; or
 //                   LIS3DH_GESTURE_WINDOW_MS passes with no new tap → window closes:
-//                     tapCount >= 2 → swap mode; tapCount == 1 → discarded as incidental
+//                     tapCount == ACCEL_MODE_SWAP_TAP_COUNT → swap mode; any other count
+//                     (including overshoot) → discarded
 static void updateAccelInput() {
   enum AccelState { IDLE, RING_SUPPRESS, WAITING };
   static AccelState state = IDLE;
@@ -216,11 +220,13 @@ static void updateAccelInput() {
   }
 
   if (state == WAITING && millis() - lastTapTime >= LIS3DH_GESTURE_WINDOW_MS) {
-    if (tapCount >= 2) {
-      DEBUG_PRINTLN("ACCEL: multi-tap → swap mode");
-      handleDoubleTap();
+    if (tapCount == ACCEL_MODE_SWAP_TAP_COUNT) {
+      DEBUG_PRINTLN("ACCEL: tap gesture → swap mode");
+      handleModeSwap();
     } else {
-      DEBUG_PRINTLN("ACCEL: single tap ignored (need a double/triple tap to swap mode)");
+      DEBUG_PRINT("ACCEL: ");
+      DEBUG_PRINT(tapCount);
+      DEBUG_PRINTLN(" tap(s) ignored (not the configured mode-swap count)");
     }
     tapCount = 0;
     state = IDLE;
@@ -319,7 +325,7 @@ void setup() {
 #ifndef USE_POT_INPUT
   // Register callbacks — the physical button drives the full gesture set.
   setSingleTapCallback(handleSingleTap);
-  setDoubleTapCallback(handleDoubleTap);
+  setDoubleTapCallback(handleModeSwap);
   setTripleTapCallback(handleTripleTap);
   setLongPressStartCallback(handleLongPressStart);
   setLongPressHoldCallback(handleLongPressHold);

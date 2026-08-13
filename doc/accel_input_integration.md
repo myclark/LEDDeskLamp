@@ -61,18 +61,26 @@ instead, from a sequence of single-tap events. See Gesture Behaviour below.
 
 | Gesture | Action |
 |---|---|
-| Double or triple tap on lamp body | Switch mode (warm ↔ cool) — same action as double-tapping the button in button mode |
-| Single tap on lamp body | Ignored |
+| Exactly `ACCEL_MODE_SWAP_TAP_COUNT` taps on lamp body (default 2, i.e. double tap) | Switch mode (warm ↔ cool) — same action as double-tapping the button in button mode |
+| Any other tap count (including 1, and any overshoot) | Ignored |
 
-A single tap is deliberately a no-op. In pot mode especially, the accelerometer is mounted
-to the same enclosure the user's hand is on constantly while turning the dial — treating
-every detected tap as a mode swap would mean brightness adjustments randomly flip WARM/COOL.
-`updateAccelInput()` in `main.cpp` counts taps instead: each detected `Sclick` increments a
-counter and starts `LIS3DH_RING_SUPPRESS_MS` (300 ms) of dead time to absorb that tap's own
-ring-down, then watches for `LIS3DH_GESTURE_WINDOW_MS` (250 ms) for another tap. If the
-window closes with 2+ taps counted, the mode swaps; with exactly 1, it's discarded as an
-incidental bump. A deliberate double or triple tap both work — there's no need to land
-exactly two.
+This is an **exact** match, not "2 or more": a single tap is always ignored as an incidental
+bump (see below), but a count that overshoots the configured value is discarded too, not
+treated as a match. In pot mode especially, the accelerometer is mounted to the same
+enclosure the user's hand is on constantly while turning the dial — treating every detected
+tap as a mode swap would mean brightness adjustments randomly flip WARM/COOL. Requiring an
+exact count also has a second purpose: it leaves the *other* of {double, triple} tap
+completely free for a future gesture, without needing new hardware — set
+`ACCEL_MODE_SWAP_TAP_COUNT` to 3 to swap which one drives the mode swap.
+
+`updateAccelInput()` in `main.cpp` counts taps to implement this: each detected `Sclick`
+increments a counter and starts `LIS3DH_RING_SUPPRESS_MS` (300 ms) of dead time to absorb
+that tap's own ring-down, then watches for `LIS3DH_GESTURE_WINDOW_MS` (250 ms) for another
+tap. If the window closes with exactly `ACCEL_MODE_SWAP_TAP_COUNT` taps counted, the mode
+swaps (via `handleModeSwap()` — the callback isn't named for a specific tap count any more,
+since the accelerometer's trigger count is configurable); any other count is discarded.
+`config.h` rejects `ACCEL_MODE_SWAP_TAP_COUNT` values outside {2, 3} at compile time — 1 must
+stay reserved as the incidental-bump filter.
 
 On/off and brightness are always handled by the primary control (pot or button), never the
 accelerometer. The battery indicator is handled by the primary control in button mode
@@ -166,8 +174,12 @@ physically mounted in the lamp body:
 - **`LIS3DH_CLICK_THS`** — if taps are frequently missed, lower the value; if the lamp
   triggers from being set down on a surface (or, in pot mode, from ordinary handling while
   turning the dial), raise it. This is the first knob to reach for if single incidental
-  bumps are registering as taps often enough to matter — the firmware-side double/triple-tap
+  bumps are registering as taps often enough to matter — the firmware-side exact-tap-count
   requirement (below) is the second line of defense, not a replacement for a sane threshold.
+- **`ACCEL_MODE_SWAP_TAP_COUNT`** — which exact tap count (2 or 3) drives the mode swap; the
+  other is left completely unbound for a future gesture. Not really a "tuning" value in the
+  empirical sense — pick it once based on which physical gesture you want to reserve, not
+  based on sensor behavior.
 - **`LIS3DH_TIME_LIMIT`** — if fast sharp taps are rejected, raise it; if slow presses
   falsely trigger taps, lower it.
 - **`LIS3DH_TIME_LATENCY`** / **`LIS3DH_TIME_WINDOW`** — currently unused; the LIS3DH's own
