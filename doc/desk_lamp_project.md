@@ -684,25 +684,6 @@ Even though wireless features aren't initially needed:
 
 ## Document Revision History
 
-- **v2.2** - Accelerometer mode-swap gesture now requires an exact tap count:
-  - Previously any count of 2 or more taps swapped the mode ("double *or* triple"). Now
-    exactly `ACCEL_MODE_SWAP_TAP_COUNT` (config.h, default 2) is required — an overshoot is
-    discarded just like an undershoot, not treated as a match
-  - This reserves the *other* of {double, triple} tap completely free for a future gesture,
-    without needing new hardware — just flip the config value
-  - `config.h` rejects values outside {2, 3} at compile time (1 must stay reserved as the
-    incidental-bump filter)
-  - Renamed `handleDoubleTap()` → `handleModeSwap()` in `main.cpp`, since "double tap" was
-    no longer an accurate name once the accelerometer's trigger count became configurable
-- **v2.1** - Recurring low-battery reminder while ON:
-  - The battery indicator no longer plays once at turn-on/wake and stops — it now repeats
-    while the lamp stays ON: immediately if the battery state worsens (e.g. LOW → CRITICAL),
-    otherwise every 20 minutes at LOW or every 5 minutes at CRITICAL
-  - Urgency now escalates two ways as the battery drains further: the pulse shape itself
-    (already existing, sharper/faster at CRITICAL) and how often it repeats (new)
-  - All battery indicator trigger sites (turn-on, wake, on-demand triple tap, and the new
-    recurring check) now go through one shared `showBatteryIndicator()` helper so they
-    agree on "when did the user last see this"
 - **v2.0** - Potentiometer input, accelerometer mode-swap gesture, task watchdog (major
   input hardware redesign — not yet flashed to real hardware, see Testing Checklist):
   - Replaced the TTP223 capacitive touch module with a compile-time choice of a
@@ -712,10 +693,15 @@ Even though wireless features aren't initially needed:
     exponential smoothing in `pot_input.cpp`, output-side brightness slew in
     `led_control.cpp`), and an RC front end (1kΩ series, 1µF shunt) as an analog
     complement to the digital filtering
-  - Added a LIS3DH accelerometer as an auxiliary input in both modes: a **double or triple**
-    tap on the lamp body swaps WARM ↔ COOL — a single tap is deliberately ignored so
-    turning the pot knob (which shakes the same enclosure the accelerometer is mounted to)
-    can't trigger an accidental mode swap. Also the sole deep-sleep wake source in
+  - Added a LIS3DH accelerometer as an auxiliary input in both modes: an **exact**
+    `ACCEL_MODE_SWAP_TAP_COUNT` taps (config.h, default 2 — double tap) on the lamp body
+    swaps WARM ↔ COOL — any other count, including a single tap or an overshoot, is
+    ignored, so turning the pot knob (which shakes the same enclosure the accelerometer is
+    mounted to) can't trigger an accidental mode swap. Requiring an exact count (not "2 or
+    more") also reserves the *other* of {double, triple} tap completely free for a future
+    gesture without new hardware; `config.h` rejects values outside {2, 3} at compile time.
+    The callback is `handleModeSwap()` (not named for a specific tap count, since the
+    accelerometer's trigger count is configurable). Also the sole deep-sleep wake source in
     potentiometer mode, since the ESP32-C3 can't wake from an ADC threshold
   - Added `POT_POWER_PIN`: the potentiometer's supply comes from a GPIO instead of the
     fixed 3.3V rail, switched off during deep sleep, with no external transistor needed
@@ -729,6 +715,13 @@ Even though wireless features aren't initially needed:
   - Reviewed every `millis()`-based timer for 32-bit rollover bugs (none found; all use the
     standard wraparound-safe idiom) and fixed one real minor bug in the deep-sleep timer's
     "not started" sentinel check
+  - The low-battery indicator now recurs while the lamp stays ON instead of playing once at
+    turn-on/wake and stopping: immediately if the battery state worsens (e.g. LOW →
+    CRITICAL), otherwise every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) at LOW or
+    `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) at CRITICAL — urgency now escalates both
+    in how the pulse looks (existing) and how often it repeats (new). Every trigger site
+    (turn-on, wake, on-demand triple tap, recurring check) shares one `showBatteryIndicator()`
+    helper in `main.cpp` so they agree on "when did the user last see this"
   - Updated wiring diagrams (Mermaid + ASCII), state machine, module structure, testing
     checklist, power budget, and bill of materials throughout this document to match
 - **v1.5** - Control scheme refactor (multi-tap gestures, RTC brightness memory, pulse indicator):
