@@ -18,16 +18,23 @@
 #endif
 
 // Pin definitions
+// BUTTON_PIN and POT_PIN are the same physical GPIO — only one is actually wired up,
+// matching whichever primary input mode is selected below (see USE_POT_INPUT).
+//
 // BUTTON_PIN: physical momentary button. Wire the button between BUTTON_PIN and 3.3V,
 // with an external ~10kΩ pull-down resistor from BUTTON_PIN to GND. Idle = LOW, pressed = HIGH.
 // (Same active-HIGH polarity as the old TTP223 module, so touch_input.cpp needs no changes.)
-#define BUTTON_PIN 3         // Physical button input; also the deep-sleep wake pin
+#define BUTTON_PIN 3         // Physical button input; also the deep-sleep wake pin (button mode)
+//
+// POT_PIN: potentiometer wiper. Outer legs to 3.3V and GND, wiper to POT_PIN (ADC1-capable).
+// Fully counter-clockwise = OFF, fully clockwise = MAX_BRIGHTNESS.
+#define POT_PIN 3            // Potentiometer wiper input (pot mode)
 #define WHITE_LED_PIN 10    // White LED control (PWM)
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
 #define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
 #define LIS3DH_SDA_PIN 8    // LIS3DH I2C data
 #define LIS3DH_SCL_PIN 9    // LIS3DH I2C clock (GPIO9 is a strapping pin, but open-drain I2C is safe after reset)
-#define LIS3DH_INT_PIN 4    // LIS3DH INT1 — separate pin from BUTTON_PIN now that the button owns GPIO3
+#define LIS3DH_INT_PIN 4    // LIS3DH INT1 — separate pin from BUTTON_PIN/POT_PIN which own GPIO3
 
 // Battery voltage calibration
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
@@ -42,6 +49,10 @@
 #define GAMMA_CORRECTION 2.2        // Gamma curve for perceptual brightness (2.0-2.5 typical)
 #define BRIGHTNESS_STEP_MS 30       // Time between brightness increments when holding (continuous)
 #define MODE_TRANSITION_MS 400      // Smooth fade duration when changing modes
+// Exponential smoothing time constant for live brightness tracking (potentiometer mode).
+// Larger = slower, dreamier follow; smaller = snappier/more direct. At this time constant,
+// brightness reaches ~95% of a new target after roughly 3x this value in ms.
+#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 150
 
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
@@ -70,6 +81,19 @@
 
 // ADC sampling
 #define ADC_SAMPLE_COUNT 8           // Number of ADC samples to average for battery voltage
+
+// ── Potentiometer tuning (only relevant when USE_POT_INPUT is defined) ─────────
+#define POT_ADC_MAX 4095             // Full-scale ADC reading at 12-bit resolution
+#define POT_SAMPLE_COUNT 4           // ADC samples averaged per read (light denoise, no delay needed)
+// On/off hysteresis, in mapped brightness units (0..MAX_BRIGHTNESS), not raw ADC counts.
+// Two different thresholds prevent flicker right at the boundary: once ON, the pot must
+// drop to/below POT_OFF_THRESHOLD to turn off; once OFF, it must rise to/above the higher
+// POT_ON_HYSTERESIS to turn back on. Between the two, the lamp just holds its last state.
+#define POT_OFF_THRESHOLD 8          // ~3% of full scale
+#define POT_ON_HYSTERESIS 13         // ~5% of full scale
+// Minimum pot movement (brightness units) that counts as user interaction for the
+// auto-off timer — filters out ADC jitter that would otherwise reset it forever.
+#define POT_MOVEMENT_DEADBAND 2
 
 // Battery voltage thresholds (volts)
 #define BATTERY_FULL 4.2
@@ -120,13 +144,27 @@
 #define DEFAULT_BRIGHTNESS 255
 
 // ── Input mode selection ───────────────────────────────────────────────────
-// On/off, brightness, and battery indicator always come from the physical button
-// (touch_input gesture engine on BUTTON_PIN).
-// Define USE_ACCEL_INPUT to additionally enable the LIS3DH accelerometer as an
-// auxiliary trigger for the mode-swap gesture (a tap on the lamp body swaps WARM/COOL,
-// same action as double-tapping the button). Comment out to run button-only —
-// double-tapping the button still swaps modes either way.
+// Primary control: choose exactly one physical input for on/off + brightness.
+//
+// Define USE_POT_INPUT for a potentiometer (pot_input.cpp): turning it fully
+// counter-clockwise requests OFF, anywhere above that requests ON at a brightness
+// proportional to position, eased with BRIGHTNESS_SLEW_TIME_CONSTANT_MS. Brightness is
+// always just "wherever the pot is right now" — there's nothing to restore from RTC memory.
+// Comment out to use the physical momentary button instead (touch_input.cpp gesture
+// engine on BUTTON_PIN): single tap on/off, long press brightness, triple tap battery
+// indicator.
+#define USE_POT_INPUT
+
+// Define USE_ACCEL_INPUT to enable the LIS3DH accelerometer as an auxiliary trigger for
+// the mode-swap gesture (a tap on the lamp body swaps WARM/COOL). In button mode this is
+// optional — double-tapping the button also swaps modes. In pot mode this is required:
+// the accelerometer is the only deep-sleep wake source once there's no button, since the
+// ESP32-C3 can't wake from an ADC threshold.
 #define USE_ACCEL_INPUT
+
+#if defined(USE_POT_INPUT) && !defined(USE_ACCEL_INPUT)
+#error "USE_POT_INPUT requires USE_ACCEL_INPUT: with no button, the accelerometer tap is the only way to wake the device from deep sleep."
+#endif
 
 // ── LIS3DH tap-detection accelerometer ────────────────────────────────────
 // Only relevant when USE_ACCEL_INPUT is defined.

@@ -42,6 +42,12 @@ static unsigned long boundaryFlashTimer = 0;
 static uint8_t boundaryFlashPWM = 0;
 static uint8_t boundaryFlashChannel = 0;
 
+// Continuous brightness slew state (potentiometer input)
+static uint8_t brightnessSlewTarget = 0;
+static float brightnessSlewCurrent = 0.0f;
+static unsigned long lastSlewUpdateTime = 0;
+static bool slewInitialized = false;
+
 // Battery indicator state
 static bool indicatorPlaying = false;
 static uint8_t indicatorPulseCount = 0;
@@ -111,6 +117,7 @@ void turnOff() {
   startWarmPWM = currentWarmPWM;
   transitionStartTime = millis();
   isTransitioning = true;
+  slewInitialized = false;  // Re-seed brightness slew cleanly on the next turnOn()
   DEBUG_PRINTLN("State: OFF");
 }
 
@@ -308,6 +315,45 @@ void updateModeTransition() {
       digitalWrite(WARM_LED_PIN, LOW);
       DEBUG_PRINTLN("OFF: PWM detached, pins forced LOW");
     }
+  }
+}
+
+void setBrightnessTarget(uint8_t target) {
+  brightnessSlewTarget = target;
+  if (!slewInitialized) {
+    // Seed from the current brightness so the very first call doesn't visibly jump or
+    // slew from zero (e.g. right after turnOn(), which already set `brightness` directly).
+    brightnessSlewCurrent = brightness;
+    lastSlewUpdateTime = millis();
+    slewInitialized = true;
+  }
+}
+
+void updateBrightnessSlew() {
+  // Let the power-on crossfade and boundary flash own the PWM output while they're active.
+  if (!slewInitialized || currentLampState != ON || isTransitioning || boundaryFlashActive) return;
+
+  unsigned long now = millis();
+  unsigned long dt = now - lastSlewUpdateTime;
+  lastSlewUpdateTime = now;
+  if (dt == 0) return;
+
+  float alpha = 1.0f - expf(-(float)dt / BRIGHTNESS_SLEW_TIME_CONSTANT_MS);
+  brightnessSlewCurrent += ((float)brightnessSlewTarget - brightnessSlewCurrent) * alpha;
+
+  uint8_t newBrightness = (uint8_t)(brightnessSlewCurrent + 0.5f);
+  if (newBrightness == brightness) return;
+
+  brightness = newBrightness;
+  uint8_t pwm = getCompensatedPWM(brightness);
+  if (currentMode == MODE_COOL) {
+    currentWhitePWM = pwm;
+    targetWhitePWM  = pwm;
+    ledcWrite(WHITE_LED_CHANNEL, pwm);
+  } else {
+    currentWarmPWM = pwm;
+    targetWarmPWM  = pwm;
+    ledcWrite(WARM_LED_CHANNEL, pwm);
   }
 }
 

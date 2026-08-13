@@ -2,7 +2,44 @@
 
 Detailed implementation notes for the ESP32-C3 desk lamp firmware.
 
-## Input Provider Abstraction
+## Primary Input: Potentiometer or Button
+
+`config.h`'s `USE_POT_INPUT` selects exactly one primary control for on/off + brightness.
+Both options share the same physical GPIO (`POT_PIN`/`BUTTON_PIN`, both GPIO3) since only
+one is ever wired up at a time. The accelerometer's role (mode-swap gesture) is the same
+either way — see the next section.
+
+### Potentiometer mode (`USE_POT_INPUT` defined — the default)
+
+`pot_input.cpp` reads the pot wiper every `loop()` iteration and treats its position as a
+live, continuous request — there's no discrete "gesture" or debounce involved, and nothing
+about brightness is persisted to RTC memory: the pot's current position *is* the requested
+brightness, always.
+
+- **Mapping:** raw ADC (0–4095 at 12-bit resolution) → brightness (0–`MAX_BRIGHTNESS`)
+  linearly via `mapPotToBrightness()`.
+- **On/off hysteresis:** two thresholds (`POT_OFF_THRESHOLD` ~3%, `POT_ON_HYSTERESIS` ~5%)
+  prevent flicker right at the "off" end of the dial — see `updatePotStateMachine()` in
+  `pot_input.cpp`, which is pure/testable and covered by `test/test_pot/`.
+- **Brightness slew:** `main.cpp` calls `setBrightnessTarget()` with the live pot reading
+  every tick; `led_control.cpp`'s `updateBrightnessSlew()` eases the actual PWM output
+  toward that target with an exponential filter (`BRIGHTNESS_SLEW_TIME_CONSTANT_MS`), so
+  fast pot movements produce a smooth, slightly-lagging ramp rather than an instant jump —
+  turning the pot back and forth quickly still "tracks" the user, just softened.
+- **Auto-off interaction:** only pot movement past `POT_MOVEMENT_DEADBAND` counts as
+  interaction — this filters ADC jitter that would otherwise reset the auto-off timer
+  forever (see Timeout Audit & Watchdog below for why that distinction matters).
+- **Wake-then-check:** since the accelerometer (not the pot) wakes the device from deep
+  sleep, a wake doesn't automatically mean "turn on" — it might just be a hand bumping the
+  lamp while reaching for the dial. On `ESP_SLEEP_WAKEUP_GPIO`, `setup()` takes a fresh pot
+  reading and only turns on if the pot itself is requesting ON; otherwise the device stays
+  OFF-but-awake and the normal deep-sleep timer puts it straight back to sleep, invisibly
+  to the user.
+- **`USE_POT_INPUT` requires `USE_ACCEL_INPUT`** — enforced with a `#error` in `config.h`.
+  With no button, the accelerometer tap is the *only* way to wake the device; without it,
+  the lamp would sleep forever once it entered deep sleep.
+
+### Button mode (`USE_POT_INPUT` commented out)
 
 The gesture layer (`touch_input.cpp`) is decoupled from physical hardware via a function pointer:
 
@@ -14,17 +51,29 @@ void injectInputEvent(bool pressed);  // for event-based sensors
 
 **Default (physical button):** reads `digitalRead(BUTTON_PIN) == HIGH`. Registered automatically in `initTouch()`. Wire the button between `BUTTON_PIN` and 3.3V with an external ~10kΩ pull-down to GND (idle LOW, pressed HIGH) — this is the same active-HIGH polarity the old TTP223 module used, so `touch_input.cpp` and its debounce/gesture engine are unchanged; only the physical part swapped.
 
-**Accelerometer (auxiliary, mode-swap only):** the LIS3DH no longer goes through the `InputStateReader`/`injectInputEvent()` path at all. It never drove on/off — that always went through the button's own gesture engine — so `main.cpp`'s `updateAccelInput()` just watches `LIS3DH_INT_PIN` directly and calls `handleDoubleTap()` (mode swap) on every detected tap, with a cooldown to ignore ring-down re-triggers. See `doc/accel_input_integration.md`.
+**Full gesture set lives on the button:** single tap (on/off), double tap (swap mode — also reachable via an accelerometer tap), long press (brightness), triple tap (battery indicator).
 
-**Full gesture set lives on the button:** single tap (on/off), double tap (swap mode — also reachable via an accelerometer tap), long press (brightness), triple tap (battery indicator). The accelerometer is optional and additive; comment out `USE_ACCEL_INPUT` in `config.h` to run button-only, or remove the sensor entirely.
+### Accelerometer (auxiliary, mode-swap only, in both modes)
 
-**Deep sleep:** wake source is `BUTTON_PIN HIGH` only — the accelerometer does not wake the device. Changing input hardware requires updating `enterDeepSleep()` in `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
+The LIS3DH never goes through the `InputStateReader`/`injectInputEvent()` path. It never
+drove on/off — that always went through the button's own gesture engine, or now the pot's
+state machine — so `main.cpp`'s `updateAccelInput()` just watches `LIS3DH_INT_PIN` directly
+and calls `handleDoubleTap()` (mode swap) on every detected tap, with a cooldown to ignore
+ring-down re-triggers. See `doc/accel_input_integration.md`. It's optional in button mode
+(comment out `USE_ACCEL_INPUT` to run button-only — double-tapping the button still swaps
+modes) but required in pot mode.
+
+**Deep sleep wake source:** `BUTTON_PIN HIGH` in button mode, `LIS3DH_INT_PIN HIGH` in pot
+mode — never both. Changing input hardware requires updating `enterDeepSleep()` in
+`main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
 
 ## Brightness Control
 
 **Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS`, gamma = 2.2. `MIN_BRIGHTNESS_PWM` (= 1) prevents fully off while ON. LUT entry [0] = 0 for OFF transitions.
 
-**Continuous dimming:** hold → increment/decrement every `BRIGHTNESS_STEP_MS` (30 ms). Direction reverses on release. Double-flash (non-blocking) on boundary hit.
+**Continuous dimming (button mode):** hold → increment/decrement every `BRIGHTNESS_STEP_MS` (30 ms). Direction reverses on release. Double-flash (non-blocking) on boundary hit.
+
+**Continuous dimming (pot mode):** no stepping or direction state — brightness eases toward the live pot reading via `updateBrightnessSlew()`, see above.
 
 **Mode crossfade:** 400 ms linear interpolation between gamma-corrected PWM values. Both LEDs updated simultaneously. Implemented as a non-blocking state machine in `updateModeTransition()`.
 
@@ -56,7 +105,7 @@ Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LO
 **Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, `turnOff()` is called; deep sleep timer then starts. `lastInteractionTime` is updated in every gesture callback and on wake from deep sleep.
 
 **Estimated power:**
-- Deep sleep: ~10 µA (ESP32-C3) + ~6 µA (LIS3DH, stays in low-power ODR mode for the mode-swap gesture) + 11 µA (divider) ≈ 27 µA — a physical button draws no standby current itself.
+- Deep sleep: ~10 µA (ESP32-C3) + ~6 µA (LIS3DH, stays in low-power ODR mode — required for wake in pot mode, used for the mode-swap gesture in button mode) + 11 µA (divider) ≈ 27 µA. A physical button draws no standby current; a potentiometer draws a small continuous current across its resistive track whenever the divider is powered (negligible at typical 10kΩ+ pot values, but non-zero unlike a button — budget it in if the pot ends up wired directly across the rail rather than only sampled).
 - ON at 50% PWM: 60–90 mA → ~28–40 h runtime (2500 mAh)
 - ON at 100% PWM: 120–180 mA → ~14–20 h runtime
 
@@ -109,6 +158,11 @@ RTC_DATA_ATTR uint8_t coolBrightness = 128;
 RTC_DATA_ATTR uint16_t bootCount     = 0;  // debug
 ```
 
+`warmBrightness`/`coolBrightness` are only meaningful in button mode, where brightness is
+an app-managed value that needs remembering per mode. In pot mode brightness is never
+persisted — it's always just read fresh from the dial — so these two variables are declared
+but unused there; `savedMode` is the only piece of state pot mode actually needs restored.
+
 ## Hardware Design Constraints
 
 - Battery → 5 V input → onboard regulator → 3.3 V ESP32 (chip range 3.0–3.6 V internally)
@@ -131,5 +185,6 @@ Tests include `.cpp` source files directly (not via linking). The mock Arduino e
 
 | Suite | File | Tests |
 |-------|------|-------|
-| Touch gestures | `test/test_touch/test_touch_input.cpp` | 11 |
+| Touch gestures (button mode) | `test/test_touch/test_touch_input.cpp` | 11 |
+| Pot mapping & hysteresis (pot mode) | `test/test_pot/test_pot_input.cpp` | 12 |
 | Battery state machine | `test/test_battery/test_battery_state_machine.cpp` | 15 |

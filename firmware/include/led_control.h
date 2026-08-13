@@ -29,6 +29,13 @@ uint8_t getActiveBrightness();
 // Smooth transition (call from loop)
 void updateModeTransition();
 
+// Continuous brightness tracking (potentiometer input). setBrightnessTarget() records the
+// desired brightness; updateBrightnessSlew() (call every loop) eases the live brightness
+// and PWM output toward that target with exponential smoothing, so fast pot movements
+// produce a smooth, slightly lagging ramp instead of an instant jump.
+void setBrightnessTarget(uint8_t target);
+void updateBrightnessSlew();
+
 // Battery indicator pulse (non-blocking)
 void playBatteryIndicator(BatteryState state);
 void updateBatteryIndicator();    // Call from loop
