@@ -55,6 +55,39 @@ brightness, always.
   With no button, the accelerometer tap is the *only* way to wake the device; without it,
   the lamp would sleep forever once it entered deep sleep.
 
+#### Hardware: pot + RC front end
+
+Analog complement to the digital filtering above — see the `POT_PIN` comment in `config.h`
+for the same values inline with the pinout.
+
+```
+3.3V ──────┬──────────────┐
+           │              │
+         [ POT ]          │
+           │              │
+   wiper ──┴──[ R 1kΩ ]──┬──► POT_PIN (GPIO3)
+                          │
+                        [ C 1µF ]
+                          │
+GND ────────────────────┴──── (pot's other outer leg also to GND)
+```
+
+- **Pot: 10kΩ linear taper.** Must be linear, not audio/log — `mapPotToBrightness()` is a
+  straight linear map, so a log-taper pot would make brightness feel badly non-uniform
+  across the travel. 10kΩ keeps source impedance low (for ADC accuracy) and idle current
+  low (3.3V / 10kΩ ≈ 330µA whenever powered — the figure assumed in the Power Management
+  estimate below).
+- **Series R: 1kΩ**, wiper to `POT_PIN`. Keeps total source impedance (pot's own ~2.5kΩ
+  worst case at mid-travel + this 1kΩ) comfortably under the ESP32 ADC's recommended limit
+  for accurate 12-bit conversions.
+- **Shunt C: 1µF ceramic (X7R, ≥6.3V)**, `POT_PIN` to GND. With R=1kΩ this gives a cutoff
+  around 160 Hz — deliberately ~30x faster than `POT_FILTER_TIME_CONSTANT_MS` (so it
+  doesn't add felt lag on top of the digital filter, just cleans up what reaches it) and
+  ~30x below the 5 kHz LED PWM frequency (meaningful attenuation of that specific noise
+  source, ~20 dB/decade past cutoff on a single-pole filter). The two filters are
+  independent and can be retuned separately: raise C (e.g. 2.2–4.7µF) for more analog
+  filtering, or lower `POT_FILTER_TIME_CONSTANT_MS` for more digital filtering.
+
 ### Button mode (`USE_POT_INPUT` commented out)
 
 The gesture layer (`touch_input.cpp`) is decoupled from physical hardware via a function pointer:

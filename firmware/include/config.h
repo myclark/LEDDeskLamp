@@ -28,6 +28,16 @@
 //
 // POT_PIN: potentiometer wiper. Outer legs to 3.3V and GND, wiper to POT_PIN (ADC1-capable).
 // Fully counter-clockwise = OFF, fully clockwise = MAX_BRIGHTNESS.
+//
+// Recommended part + RC front end (analog complement to the digital filtering in
+// pot_input.cpp — see POT_FILTER_TIME_CONSTANT_MS below):
+//   - 10kΩ LINEAR taper pot (not audio/log — mapPotToBrightness() is a straight linear
+//     map, so a log-taper pot would make brightness feel badly non-uniform across travel)
+//   - Wiper -> 1kΩ series resistor -> POT_PIN, then a 1µF ceramic cap from POT_PIN to GND.
+//     ~160Hz cutoff: ~30x faster than the digital filter (doesn't add felt lag) and ~30x
+//     below the 5kHz LED PWM frequency (knocks that noise source down significantly).
+//     Keeps total source impedance (pot's own ~2.5kΩ worst case + this 1kΩ) comfortably
+//     under the ESP32 ADC's recommended limit for accurate 12-bit reads.
 #define POT_PIN 3            // Potentiometer wiper input (pot mode)
 #define WHITE_LED_PIN 10    // White LED control (PWM)
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
