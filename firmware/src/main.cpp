@@ -32,6 +32,22 @@ static uint8_t* getModeBrightness(uint8_t mode) {
   return (mode == MODE_WARM) ? &warmBrightness : &coolBrightness;
 }
 
+// Tracks the recurring low-battery reminder (see loop()): when the indicator was last
+// shown, and which state it was last shown for, so the periodic reminder knows both when
+// to repeat and when to fire immediately because the battery just got worse.
+static unsigned long lastBatteryIndicatorTime = 0;
+static BatteryState lastAnnouncedBatteryState = BATTERY_NORMAL;
+
+// Every trigger site (turn-on, wake, on-demand triple tap, and the periodic reminder in
+// loop()) goes through this so they all share one "when did we last show it" clock —
+// otherwise the periodic reminder would have no way to know a turn-on/wake/manual check
+// already covered the user just now.
+static void showBatteryIndicator(BatteryState state) {
+  playBatteryIndicator(state);
+  lastBatteryIndicatorTime = millis();
+  lastAnnouncedBatteryState = state;
+}
+
 // Callback: single tap — toggle ON/OFF
 void handleSingleTap() {
   DEBUG_PRINTLN(">>> SINGLE TAP");
@@ -54,7 +70,7 @@ void handleSingleTap() {
     // Auto battery indicator when LOW or CRITICAL
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
       setTouchBlocked(true);
-      playBatteryIndicator(batteryState);
+      showBatteryIndicator(batteryState);
     }
   }
 }
@@ -85,7 +101,7 @@ void handleTripleTap() {
 
   readBatteryVoltage();
   setTouchBlocked(true);
-  playBatteryIndicator(getBatteryState());
+  showBatteryIndicator(getBatteryState());
 }
 
 // Callback: long press initial trigger — first brightness increment
@@ -140,7 +156,7 @@ static void updatePotControl() {
     setBrightnessTarget(target);
 
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
-      playBatteryIndicator(batteryState);
+      showBatteryIndicator(batteryState);
     }
   } else if (!wantsOn && currentLampState == ON) {
     DEBUG_PRINTLN(">>> POT: requesting OFF");
@@ -333,7 +349,7 @@ void setup() {
       readBatteryVoltage();
       BatteryState batteryState = getBatteryState();
       if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
-        playBatteryIndicator(batteryState);
+        showBatteryIndicator(batteryState);
       }
     } else {
       DEBUG_PRINTLN("Woke but pot is still at OFF — going back to sleep shortly");
@@ -348,7 +364,7 @@ void setup() {
     BatteryState batteryState = getBatteryState();
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
       setTouchBlocked(true);
-      playBatteryIndicator(batteryState);
+      showBatteryIndicator(batteryState);
     }
 #endif
   } else {
@@ -406,6 +422,32 @@ void loop() {
     setTouchBlocked(false);
   }
   indicatorWasPlaying = indicatorNowPlaying;
+
+  // Recurring low-battery reminder while ON: fires immediately the moment the battery
+  // worsens into LOW/CRITICAL (whether that's a fresh drain while already ON, or a
+  // degrade from LOW to CRITICAL), then repeats periodically for as long as it stays
+  // that way. Turn-on/wake/on-demand triggers elsewhere already cover "just started using
+  // it with a bad battery" — this covers "still using it, and it's gotten worse or it's
+  // been a while since the last reminder."
+  if (currentLampState == ON && !isPlayingIndicator()) {
+    BatteryState bs = getBatteryState();
+    if (bs == BATTERY_LOW || bs == BATTERY_CRITICAL) {
+      unsigned long repeatInterval = (bs == BATTERY_CRITICAL)
+        ? BATTERY_INDICATOR_REPEAT_CRITICAL_MS : BATTERY_INDICATOR_REPEAT_LOW_MS;
+      bool worsenedSinceLastShown = (bs != lastAnnouncedBatteryState);
+      if (worsenedSinceLastShown || millis() - lastBatteryIndicatorTime >= repeatInterval) {
+        DEBUG_PRINTLN(">>> Recurring low-battery reminder");
+#ifndef USE_POT_INPUT
+        setTouchBlocked(true);
+#endif
+        showBatteryIndicator(bs);
+      }
+    } else {
+      // Battery recovered — clear the "worsened" memory so a future dip announces
+      // immediately again instead of waiting out a stale repeat interval.
+      lastAnnouncedBatteryState = bs;
+    }
+  }
 
   // Auto-off: turn off after AUTO_OFF_TIMEOUT_MS of no user interaction
 #if AUTO_OFF_ENABLED

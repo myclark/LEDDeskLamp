@@ -414,7 +414,9 @@ staying frozen indefinitely. See Software Architecture below.
   min/max boundary); triple tap plays the non-blocking battery level pulse indicator
 - Double or triple tap on the lamp body (accelerometer, both modes): swap WARM↔COOL with
   crossfade. A single tap is ignored — see Accelerometer Mode-Swap Gesture above
-- Auto battery indicator on turn-on when battery is LOW or CRITICAL, both modes. In button
+- Auto battery indicator on turn-on when battery is LOW or CRITICAL, both modes, then
+  recurring periodically for as long as the lamp stays ON and the battery stays that way
+  (immediately again if it gets worse) — see Battery Indicator Pulse below. In button
   mode the button's own gesture recognition is paused during playback
   (`setTouchBlocked()`); in pot mode the pot keeps tracking live and the accelerometer
   gesture keeps working throughout, since pot mode has no equivalent "block" concept —
@@ -428,8 +430,8 @@ Battery monitoring runs in parallel with hysteresis to prevent state flickering:
 | State | Voltage | Behaviour |
 |-------|---------|-----------|
 | NORMAL | > 3.5V | Full operation |
-| LOW | 3.2V - 3.5V | Pulse indicator on turn-on (wake or tap from OFF) |
-| CRITICAL | 3.0V - 3.2V | Pulse indicator on every turn-on, brightness limited to 50% |
+| LOW | 3.2V - 3.5V | Pulse indicator on turn-on/wake, then recurring every 20 min while ON |
+| CRITICAL | 3.0V - 3.2V | Pulse indicator on every turn-on, brightness limited to 50%, recurring every 5 min while ON |
 | CUTOFF | < 3.0V | Refuse to turn on, enter deep sleep immediately |
 
 **Hysteresis:** Requires 3 consecutive readings (90 seconds) to enter CRITICAL, and voltage must rise 100-200mV to recover to a higher state.
@@ -445,6 +447,8 @@ Replaces hard flashing with a smooth sine-envelope pulse. Pulse characteristics 
 | CRITICAL | 1 (sharp) | 300ms | 5.0 (aggressive) |
 
 Plays on the currently active LED channel at the current brightness (min 25%). In button mode the button's own gesture recognition is blocked during playback and automatically unblocked when complete; pot tracking and the accelerometer gesture are not paused in either mode (see State Behaviours above).
+
+**Not just a one-shot at turn-on:** while the lamp stays ON, the indicator repeats — immediately if the battery gets worse (LOW → CRITICAL), otherwise every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) at LOW or `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) at CRITICAL. This is on top of the pulse shape above already getting sharper/faster at CRITICAL, so urgency escalates two ways as the battery gets lower: how the pulse looks, and how often it repeats. Every trigger — turn-on, wake, on-demand triple tap, and this recurring check — goes through one shared `showBatteryIndicator()` helper in `main.cpp` so they all agree on "when did the user last see this."
 
 ## Software Architecture
 
@@ -675,6 +679,15 @@ Even though wireless features aren't initially needed:
 
 ## Document Revision History
 
+- **v2.1** - Recurring low-battery reminder while ON:
+  - The battery indicator no longer plays once at turn-on/wake and stops — it now repeats
+    while the lamp stays ON: immediately if the battery state worsens (e.g. LOW → CRITICAL),
+    otherwise every 20 minutes at LOW or every 5 minutes at CRITICAL
+  - Urgency now escalates two ways as the battery drains further: the pulse shape itself
+    (already existing, sharper/faster at CRITICAL) and how often it repeats (new)
+  - All battery indicator trigger sites (turn-on, wake, on-demand triple tap, and the new
+    recurring check) now go through one shared `showBatteryIndicator()` helper so they
+    agree on "when did the user last see this"
 - **v2.0** - Potentiometer input, accelerometer mode-swap gesture, task watchdog (major
   input hardware redesign — not yet flashed to real hardware, see Testing Checklist):
   - Replaced the TTP223 capacitive touch module with a compile-time choice of a

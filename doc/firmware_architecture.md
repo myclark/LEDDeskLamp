@@ -155,13 +155,19 @@ mode — never both. Changing input hardware requires updating `enterDeepSleep()
 | State | Voltage | Behaviour |
 |-------|---------|-----------|
 | NORMAL | > 3.5 V | Full operation |
-| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on |
-| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at 50% |
+| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, then recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
+| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at 50%, recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
 | CUTOFF | < 3.0 V | Refuse to turn on, enter deep sleep |
 
 Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LOW needs > 3.3 V; CUTOFF→CRITICAL needs > 3.2 V (typically charging).
 
-**Battery indicator pulse:** non-blocking sine-envelope animation. Sharpness encodes urgency (1.0 = smooth sine, 5.0 = sharp spike). Blocks touch input while playing.
+**Battery indicator pulse:** non-blocking sine-envelope animation. Sharpness encodes urgency (1.0 = smooth sine, 5.0 = sharp spike). In button mode, the button's own gesture recognition is blocked while playing; pot tracking and the accelerometer gesture are never blocked in either mode.
+
+**Recurring reminder while ON:** the indicator isn't just a one-shot at turn-on/wake — `main.cpp`'s `showBatteryIndicator()` wrapper is the single trigger point every call site goes through (turn-on, wake, on-demand triple tap in button mode, and the periodic check in `loop()`), tracking when it was last shown and for which state. Two things make it fire again while the lamp stays ON:
+1. **The battery state gets worse** (e.g. LOW → CRITICAL) — fires immediately, regardless of the repeat timer, so a mid-session degradation is never silently missed.
+2. **The repeat interval elapses** while still LOW or CRITICAL — `BATTERY_INDICATOR_REPEAT_LOW_MS` / `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (config.h), CRITICAL repeating more often than LOW. Combined with the pulse shape itself already being sharper/faster at CRITICAL, this makes the reminder more insistent the lower the battery gets on two independent axes (how it looks, and how often it repeats).
+
+The "worsened" memory resets once the battery recovers back to NORMAL, so a future dip announces immediately again rather than waiting out a stale interval.
 
 ## Power Management
 

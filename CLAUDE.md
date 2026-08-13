@@ -56,7 +56,7 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 
 A single tap on the lamp body is deliberately ignored (not just while OFF) — turning the pot knob shakes the same enclosure the accelerometer is mounted to, so requiring 2+ taps within the gesture window keeps ordinary brightness adjustment from randomly swapping modes.
 
-Brightness is never persisted — it's always just wherever the pot currently points. Battery indicator shows automatically on wake/turn-on when LOW/CRITICAL; there's no on-demand gesture for it.
+Brightness is never persisted — it's always just wherever the pot currently points. Battery indicator shows automatically on wake/turn-on when LOW/CRITICAL, then recurs periodically while ON (`BATTERY_INDICATOR_REPEAT_LOW_MS`/`_CRITICAL_MS`, immediately again if it gets worse); there's no on-demand gesture for it.
 
 **Button mode:**
 
@@ -88,6 +88,8 @@ Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then de
 #define POT_OFF_THRESHOLD 8          // Pot mode: brightness units at/below which lamp turns off
 #define POT_ON_HYSTERESIS 13         // Pot mode: brightness units at/above which lamp turns on
 #define POT_MAX_DEADZONE 8           // Pot mode: snaps to MAX_BRIGHTNESS within this margin of full scale
+#define BATTERY_INDICATOR_REPEAT_LOW_MS      (20UL*60*1000)  // Recurring reminder while ON + LOW
+#define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL*60*1000)   // Recurring reminder while ON + CRITICAL
 ```
 
 Battery thresholds (`BATTERY_LOW_THRESHOLD`, `BATTERY_CRITICAL_THRESHOLD`, etc.) and all pulse animation params are also in `config.h`.

@@ -183,6 +183,14 @@
 #define PULSE_CRITICAL_PERIOD_MS 300
 #define PULSE_CRITICAL_SHARPNESS 5.0
 
+// Recurring low-battery reminder while ON: the indicator plays immediately whenever the
+// battery state worsens into LOW/CRITICAL (whether that happens at turn-on/wake, or while
+// already ON and draining), then repeats periodically as a continuing reminder. CRITICAL
+// repeats more often than LOW — more insistent the lower the battery gets, on top of the
+// pulse shape itself already being sharper/faster at CRITICAL (see PULSE_* above).
+#define BATTERY_INDICATOR_REPEAT_LOW_MS      (20UL * 60 * 1000)  // 20 min
+#define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL * 60 * 1000)   // 5 min
+
 // Default brightness on first power-up (RTC memory cleared)
 #define DEFAULT_BRIGHTNESS 255
 
