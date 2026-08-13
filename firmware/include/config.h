@@ -213,15 +213,26 @@
 // Only relevant when USE_ACCEL_INPUT is defined.
 #define LIS3DH_I2C_ADDR      0x19   // Default; 0x18 if address jumper bridged
 
-#define LIS3DH_CLICK_CFG     0x15   // Single-tap only, all axes (ZS+YS+XS). No hardware or
-                                    // firmware double-tap discrimination needed any more —
-                                    // every detected tap simply fires the mode-swap gesture.
+#define LIS3DH_CLICK_CFG     0x15   // Single-tap only, all axes (ZS+YS+XS). Hardware double-
+                                    // tap discrimination is still disabled (ring-down from a
+                                    // physical tap falls within the hardware double-tap
+                                    // window, making every tap look like a Dclick) — the
+                                    // double/triple-tap gesture below is counted in firmware
+                                    // from single-tap (Sclick) events instead.
 #define LIS3DH_CLICK_THS     0x20   // ~512 mg threshold
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
 #define LIS3DH_TIME_LIMIT    0x06   // 60 ms max tap impulse window — filters slow movement transients
-#define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap
-#define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window
-// Post-tap cooldown before re-arming (suppresses ring-down re-triggers from the same tap)
-#define LIS3DH_COOLDOWN_MS        300
+#define LIS3DH_TIME_LATENCY  0x10   // 160 ms dead time after first tap (unused: hardware
+                                    // double-tap detection is disabled, see LIS3DH_CLICK_CFG)
+#define LIS3DH_TIME_WINDOW   0x18   // 240 ms second-tap acceptance window (unused, same reason)
+// Firmware-side multi-tap gesture (see updateAccelInput() in main.cpp): mode swap requires
+// a double or triple tap so an incidental bump — turning the pot knob shakes the enclosure
+// the accelerometer is mounted to — can't trigger it by itself.
+// Dead time after each detected tap to absorb that tap's own ring-down before watching for
+// the next one in the sequence.
+#define LIS3DH_RING_SUPPRESS_MS   300
+// Window after ring-down closes to catch the next tap; if it passes with only one tap
+// counted, the gesture is discarded as incidental rather than swapping the mode.
+#define LIS3DH_GESTURE_WINDOW_MS  250
 
 #endif // CONFIG_H

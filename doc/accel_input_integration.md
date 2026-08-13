@@ -48,8 +48,10 @@ a task watchdog (`esp_task_wdt`) is also armed as a backstop that reboots the de
 All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_CTRL_REG1`,
 timing registers, pins) live in `firmware/include/config.h` — that file is the source of
 truth; don't duplicate values here where they can drift out of sync. Current defaults use
-single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`) since the firmware no longer
-needs hardware or firmware double-tap discrimination — see Gesture Behaviour below.
+single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the hardware doesn't do any
+double-tap discrimination (ring-down from one physical tap falls within its own double-tap
+window, making every tap look like a Dclick) — the multi-tap gesture is counted in firmware
+instead, from a sequence of single-tap events. See Gesture Behaviour below.
 
 ---
 
@@ -59,12 +61,18 @@ needs hardware or firmware double-tap discrimination — see Gesture Behaviour b
 
 | Gesture | Action |
 |---|---|
-| Tap on lamp body | Switch mode (warm ↔ cool) — same action as double-tapping the button in button mode |
+| Double or triple tap on lamp body | Switch mode (warm ↔ cool) — same action as double-tapping the button in button mode |
+| Single tap on lamp body | Ignored |
 
-Any detected tap (`Sclick` bit in `CLICK_SRC`) immediately fires the mode-swap gesture —
-there's no single-vs-double discrimination to wait on, so no latency beyond reading the
-register. After dispatch, `LIS3DH_COOLDOWN_MS` (300 ms) suppresses re-triggers from the
-same tap's ring-down before the state machine re-arms.
+A single tap is deliberately a no-op. In pot mode especially, the accelerometer is mounted
+to the same enclosure the user's hand is on constantly while turning the dial — treating
+every detected tap as a mode swap would mean brightness adjustments randomly flip WARM/COOL.
+`updateAccelInput()` in `main.cpp` counts taps instead: each detected `Sclick` increments a
+counter and starts `LIS3DH_RING_SUPPRESS_MS` (300 ms) of dead time to absorb that tap's own
+ring-down, then watches for `LIS3DH_GESTURE_WINDOW_MS` (250 ms) for another tap. If the
+window closes with 2+ taps counted, the mode swaps; with exactly 1, it's discarded as an
+incidental bump. A deliberate double or triple tap both work — there's no need to land
+exactly two.
 
 On/off and brightness are always handled by the primary control (pot or button), never the
 accelerometer. The battery indicator is handled by the primary control in button mode
@@ -156,13 +164,23 @@ All timing and threshold values require empirical adjustment once the sensor is
 physically mounted in the lamp body:
 
 - **`LIS3DH_CLICK_THS`** — if taps are frequently missed, lower the value; if the lamp
-  triggers from being set down on a surface, raise it.
+  triggers from being set down on a surface (or, in pot mode, from ordinary handling while
+  turning the dial), raise it. This is the first knob to reach for if single incidental
+  bumps are registering as taps often enough to matter — the firmware-side double/triple-tap
+  requirement (below) is the second line of defense, not a replacement for a sane threshold.
 - **`LIS3DH_TIME_LIMIT`** — if fast sharp taps are rejected, raise it; if slow presses
   falsely trigger taps, lower it.
-- **`LIS3DH_TIME_LATENCY`** — raise if the physical impulse of the first tap rings into
-  a spurious second detection; lower to allow faster double-taps.
-- **`LIS3DH_TIME_WINDOW`** — controls how quickly the user must complete a double-tap.
-  400 ms total is a comfortable starting point.
+- **`LIS3DH_TIME_LATENCY`** / **`LIS3DH_TIME_WINDOW`** — currently unused; the LIS3DH's own
+  hardware double-tap detection is disabled (see `LIS3DH_CLICK_CFG` above), so these
+  timing registers have no effect. Only relevant if hardware double-tap detection is ever
+  re-enabled.
+- **`LIS3DH_RING_SUPPRESS_MS`** — raise if a single physical tap's ring-down is still
+  getting counted as a second tap (inflating a deliberate single-tap-that-should-be-ignored
+  into an accidental double); lower to make back-to-back deliberate taps register faster.
+- **`LIS3DH_GESTURE_WINDOW_MS`** — controls how quickly the second (or third) tap of a
+  deliberate gesture must arrive after the previous one's ring-down clears. Raise if
+  intentional double-taps are being missed (window closing before the next tap lands);
+  lower to make the gesture feel snappier.
 - **`LIS3DH_CLICK_CFG`** — if Z-axis taps are unreliable with the sensor mounted at an
   angle, enable additional axes (`0x3F`) and check the Z/Y/X bits of `CLICK_SRC`
   (bits 2–0) to see which axis is actually firing, then narrow the config accordingly.

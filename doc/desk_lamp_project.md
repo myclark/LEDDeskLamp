@@ -19,10 +19,13 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
 1. Reliable charging and power management
 2. Improved battery capacity (2000-3000mAh)
 3. Low-battery warning indicator with intelligent state machine
-4. Intuitive operation (tap to cycle modes, hold for brightness adjustment)
-5. Efficient power usage with deep sleep capability (~22.5µA)
+4. Intuitive operation — potentiometer for on/off + live brightness by default, or a
+   physical button (tap to toggle, hold for brightness) as a compile-time alternative
+5. Efficient power usage with deep sleep capability (~21-27µA in both input modes)
 6. Smooth gamma-corrected brightness control
 7. Easy to build on perfboard with through-hole components
+8. Reliable recovery from firmware faults (task watchdog + I2C timeout) rather than an
+   unresponsive lamp requiring a battery pull
 
 ## Components List
 
@@ -35,7 +38,15 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
   - WiFi/BLE present but unused
 - **TP4056 USB-C charger module** with protection
 - **18650 Li-ion battery** (2000-3000mAh, standard 3.7V nominal)
-- **TTP223 capacitive touch module**
+- **Primary control — one of:**
+  - **10kΩ linear-taper potentiometer** (default, `USE_POT_INPUT` in `config.h`) — must be
+    linear, not audio/log taper, since brightness mapping is a straight linear function of
+    ADC reading
+  - **Physical momentary pushbutton** (normally-open) — compile-time alternative; both share
+    the same GPIO (GPIO3), only one is ever wired up
+- **LIS3DH accelerometer module** (e.g. SparkFun SEN-13963) — auxiliary double/triple-tap
+  mode-swap (WARM ↔ COOL) gesture in both input modes; also the sole deep-sleep wake source
+  when the potentiometer is in use (required there, optional in button mode)
 
 ### Switching and Control
 - **2× N-channel MOSFETs** (TO-92 package for through-hole)
@@ -51,10 +62,19 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
 - **MOSFET gate resistors:**
   - 2× 120Ω resistors (GPIO to MOSFET gate, current limiting)
   - 2× 10kΩ resistors (gate to ground pull-down, prevents float during boot)
+- **Potentiometer RC front end** (pot mode only, analog complement to firmware-side
+  filtering — see `doc/firmware_architecture.md` for the full derivation):
+  - 1× 1kΩ resistor (wiper to `POT_PIN`, series)
+  - 1× 1µF ceramic capacitor (X7R, ≥6.3V — `POT_PIN` to GND, shunt)
+- **Button pull-down** (button mode only, if not using the potentiometer): 1× 10kΩ resistor
+  (`BUTTON_PIN` to GND)
 - **LED current limiting resistors** (values TBD based on LED specifications)
 - Pin headers for modular connections
 
 ## Wiring Diagram
+
+Primary control is a compile-time choice (`USE_POT_INPUT` in `config.h`) — the diagrams
+below show the potentiometer (default); see the Button Mode Alternative note for the swap.
 
 ### Block Diagram (Mermaid)
 
@@ -62,7 +82,7 @@ Rebuilding a failed table LED lamp using salvaged components (LED assembly and f
 graph TB
     USB[USB-C Port] --> TP4056[TP4056 Charger Module<br/>with BMS Protection]
 
-    BATT[18650 Li-ion Battery<br/>2500mAh 3.7V nominal] --> |"B+"| TP4056
+    BATT[18650 Li-ion Battery<br/>2500-3000mAh 3.7V nominal] --> |"B+"| TP4056
     BATT --> |"B-"| TP4056
 
     TP4056 --> |"OUT+ (3.0-4.2V)"| VBAT_RAIL[Battery Rail VBAT]
@@ -76,9 +96,20 @@ graph TB
     ESP32_5V --> |"Onboard 3.3V reg"| ESP32_CORE[ESP32-C3 Core<br/>3.3V Logic]
     GND_RAIL --> ESP32_GND[ESP32-C3 GND]
 
-    ESP32_CORE --> |"3.3V out"| TOUCH_VCC[TTP223 VCC]
-    TOUCH_OUT[TTP223 OUT] --> GPIO3[GPIO3 Touch Input]
-    ESP32_GND --> TOUCH_GND[TTP223 GND]
+    ESP32_CORE --> GPIO1[GPIO1 Output]
+    GPIO1 --> |"Switched supply<br/>off during sleep"| POT_T1[Pot Terminal 1]
+    POT_T1 --> POT[10kΩ Linear Pot]
+    POT --> |"Terminal 2"| GND_RAIL
+    POT --> |"Wiper"| POT_R["1kΩ series R"]
+    POT_R --> POT_NODE[POT_PIN Node]
+    POT_NODE --> |"1µF to GND"| GND_RAIL
+    POT_NODE --> GPIO3[GPIO3 ADC]
+
+    ESP32_CORE --> |"I2C SDA"| GPIO8[GPIO8]
+    ESP32_CORE --> |"I2C SCL"| GPIO9[GPIO9]
+    GPIO8 --> LIS3DH[LIS3DH Accelerometer]
+    GPIO9 --> LIS3DH
+    LIS3DH --> |"INT1"| GPIO4[GPIO4 Interrupt<br/>+ deep sleep wake]
 
     ESP32_CORE --> GPIO10[GPIO10 PWM]
     ESP32_CORE --> GPIO5[GPIO5 PWM]
@@ -104,7 +135,9 @@ graph TB
     Q2 --> |"Source"| GND_RAIL
 
     GPIO0 -.-> ESP32_CORE
+    GPIO1 -.-> ESP32_CORE
     GPIO3 -.-> ESP32_CORE
+    GPIO4 -.-> ESP32_CORE
     GPIO10 -.-> ESP32_CORE
     GPIO5 -.-> ESP32_CORE
 
@@ -115,6 +148,8 @@ graph TB
     style Q2 fill:#e8f5e1
     style WHITE_LED fill:#ffffcc
     style WARM_LED fill:#ffe6cc
+    style LIS3DH fill:#f0e1ff
+    style POT fill:#e1ffe8
 ```
 
 ### Detailed Circuit Diagram (ASCII)
@@ -152,62 +187,88 @@ graph TB
               │              │        │  │
           BATT V+       BATT V+       │  │
               │              │        │  │
-              │   ┌──────────┴────────┴──┴────┐
-              │   │   ESP32-C3 SuperMini      │
-              │   │                           │
-              │   │  5V ←─── (via onboard reg)│
-              │   │  GND                      │
-              │   │                           │
-              │   │  GPIO3 ←─────┐           │
-              │   │  GPIO10 ──┐  │           │
-              │   │  GPIO5  ──┼──┼──────┐    │
-              │   └───────────┼──┼──────┼────┘
-              │               │  │      │
-              │           ┌───┘  │      │
-              │           │  ┌───┴───┐  │
-              │           │  │TTP223 │  │
-              │           │  │ Touch │  │
-              │           │  └───┬───┘  │
-              │           │      │      │
-              │           │     3.3V   GND
-              │           │
-              │         [120Ω]       [120Ω]
-              │           │             │
-              │           ├──────┐      ├──────┐
-              │           │ 10kΩ │      │ 10kΩ │
-              │           │  │   │      │  │   │
-              │          Gate  ─┴─     Gate  ─┴─
-              │           │             │
-              │        ┌──┴──┐       ┌──┴──┐
-              │        │ Q1  │       │ Q2  │
-              │        │N-FET│       │N-FET│
-              │        └──┬──┘       └──┬──┘
-              │           │             │
-              │         Drain         Drain
-              │           │             │
-              │     ┌─────┴──────┐      │
-              │     │ White LED  │      │
-              │     └────────────┘      │
-              │           │             │
-              │     ┌─────┴──────────────┘
-              │     │  Warm LED  │
-              │     └────────────┘
-              │           │
-              └───────────┘
+              │   ┌──────────┴────────┴──┴──────────────────────┐
+              │   │            ESP32-C3 SuperMini                │
+              │   │                                              │
+              │   │  5V  ←── (via onboard reg)                   │
+              │   │  GND                                         │
+              │   │                                              │
+              │   │  GPIO1  ──► pot power switch (pot mode)   ───┼──► see Potentiometer Detail
+              │   │  GPIO3  ◄── pot wiper / physical button   ───┼──► see Potentiometer Detail /
+              │   │                                              │    Button Mode Alternative
+              │   │  GPIO4  ◄── LIS3DH INT1                   ───┼──► see Accelerometer Detail
+              │   │  GPIO8  ── I2C SDA                        ───┼──► see Accelerometer Detail
+              │   │  GPIO9  ── I2C SCL                        ───┼──► see Accelerometer Detail
+              │   │  GPIO10 ──┐                                  │
+              │   │  GPIO5  ──┼──┐                               │
+              │   └───────────┼──┼───────────────────────────────┘
+              │               │  │
+              │             [120Ω]       [120Ω]
+              │               │             │
+              │               ├──────┐      ├──────┐
+              │               │ 10kΩ │      │ 10kΩ │
+              │               │  │   │      │  │   │
+              │              Gate  ─┴─     Gate  ─┴─
+              │               │             │
+              │            ┌──┴──┐       ┌──┴──┐
+              │            │ Q1  │       │ Q2  │
+              │            │N-FET│       │N-FET│
+              │            └──┬──┘       └──┬──┘
+              │               │             │
+              │             Drain         Drain
+              │               │             │
+              │         ┌─────┴──────┐      │
+              │         │ White LED  │      │
+              │         └────────────┘      │
+              │               │             │
+              │         ┌─────┴──────────────┘
+              │         │  Warm LED  │
+              │         └────────────┘
+              │               │
+              └───────────────┘
             (Common anode to BATT V+)
+
+Potentiometer Detail (pot mode, USE_POT_INPUT defined — default):
+  GPIO1 ─────────┬── Pot Terminal 1     (switched supply, off during deep sleep,
+                  │                      no transistor needed — see doc/firmware_architecture.md)
+                [10kΩ linear taper pot]
+                  │
+  GND ────────────┴── Pot Terminal 2
+
+  Wiper ──[1kΩ]──┬── GPIO3 (POT_PIN, ADC)
+                  │
+                [1µF]
+                  │
+                 GND
+
+Button Mode Alternative (USE_POT_INPUT commented out in config.h):
+  3.3V ──[Button]──┬── GPIO3 (BUTTON_PIN)
+                    │
+                  [10kΩ]
+                    │
+                   GND
+  (GPIO1 pot-power switch is unused in this mode; the potentiometer branch above is
+  replaced entirely by this button + pull-down.)
+
+Accelerometer Detail (mode-swap gesture, LIS3DH — both input modes):
+  GPIO8 (SDA) ──────── LIS3DH SDA
+  GPIO9 (SCL) ──────── LIS3DH SCL
+  GPIO4       ◄─────── LIS3DH INT1   (also the deep-sleep wake pin in pot mode only)
+  3.3V        ──────── LIS3DH VCC
+  GND         ──────── LIS3DH GND
 
 MOSFET Gate Circuit Detail:
   GPIO10 ──[120Ω]──┬── Q1 Gate
-                   │
-                 [10kΩ]
-                   │
-                  GND
+                    │
+                  [10kΩ]
+                    │
+                   GND
 
   GPIO5 ──[120Ω]───┬── Q2 Gate
-                   │
-                 [10kΩ]
-                   │
-                  GND
+                    │
+                  [10kΩ]
+                    │
+                   GND
 ```
 
 ## Key Design Decisions
@@ -251,17 +312,42 @@ float voltage = adcValue * (3.3 / 4095.0) * (122.0 / 22.0);  // Scaling factor =
 // Gives 0.757V at 4.2V battery (more headroom, slightly lower resolution)
 ```
 
-### Touch Sensing
-- **TTP223 module recommended** over Arduino capacitive library
-- Enables deep sleep mode (~10µA vs ~5-10mA)
-- Simple 3-wire connection (VCC, GND, OUT)
-- Active-high output suitable for interrupt wake-up
+### Primary Input: Potentiometer or Button
+
+`USE_POT_INPUT` in `config.h` selects exactly one primary control at compile time; both
+share GPIO3 since only one is ever physically wired up. Full detail (mapping, hysteresis,
+noise filtering, timing) is in `doc/firmware_architecture.md` — this is the summary.
+
+**Potentiometer (default):** a live, continuously-polled analog control, not a discrete
+gesture. The pot's position directly maps to brightness; turning it to/below a threshold
+near the bottom of its travel turns the lamp off, with separate off/on thresholds
+(hysteresis) so noise at the boundary can't flicker it. Nothing about brightness is
+persisted — the pot's current position always *is* the requested brightness. Since the
+ESP32-C3 can't wake from an ADC threshold, the accelerometer becomes the deep-sleep wake
+source in this mode (enforced by a compile-time check — pot mode without the accelerometer
+would leave no way to wake the device).
+
+**Physical button (alternative):** the original tap/hold gesture model — single tap
+toggles on/off, double tap swaps WARM/COOL, long press adjusts brightness, triple tap
+shows the battery indicator. The button itself is the deep-sleep wake source in this mode.
+
+### Accelerometer Mode-Swap Gesture
+
+The LIS3DH is an auxiliary input in both modes, used only to swap WARM ↔ COOL. It requires
+a **double or triple tap** — a single tap is deliberately ignored, since in pot mode
+especially the accelerometer is mounted to the same enclosure the user's hand is on
+constantly while turning the dial; treating every tap as a mode swap would mean ordinary
+brightness adjustment randomly flipped the color mode. Firmware counts taps within a short
+window (see `doc/accel_input_integration.md`) and only dispatches the swap once 2 or more
+are seen; a lone tap times out and is discarded as incidental.
 
 ## State Machine Design
 
 ### Lamp States
 
-The lamp has two states (OFF / ON) with gesture-based multi-tap control:
+The lamp has two states (OFF / ON). How you get between them depends on the primary input
+mode — the potentiometer's position drives the transition directly (no gesture involved);
+the button uses the original tap/hold gesture model.
 
 ```
                     ┌─────────────────────────────────┐
@@ -277,39 +363,63 @@ The lamp has two states (OFF / ON) with gesture-based multi-tap control:
               │ SLEEP     │                          │
               └─────┬─────┘                          │
                     │                                │
-         Single tap (or wake from sleep)             │
+   Pot above on-threshold, or button single tap,      │
+   or wake-then-check after a bump (pot mode only)    │
                     │                                │
                     ▼                                │
         ┌─────────────────────┐                      │
         │          ON         │                      │
         │                     │                      │
-        │  Mode: WARM or COOL │──── Single tap ──────┘
-        │  (remembers last)   │
-        │                     │
-        │  Double tap → swap WARM↔COOL (crossfade)   │
-        │  Long press → adjust brightness            │
-        │  Triple tap → battery level indicator      │
+        │  Mode: WARM or COOL │── Pot to/below off-  ─┘
+        │  (remembers last)   │   threshold, or
+        │                     │   button single tap
+        │  Double/triple tap on lamp body (either     │
+        │    mode) → swap WARM↔COOL (crossfade)       │
+        │  Pot mode: brightness tracks pot position   │
+        │    live (eased ramp)                        │
+        │  Button mode: long press → adjust brightness│
+        │    Button mode: triple tap → battery level  │
         └─────────────────────┘
 ```
+
+A task watchdog runs underneath both states: if `loop()` ever fails to check in for
+`WATCHDOG_TIMEOUT_MS` (8s default) — an I2C bus stall talking to the LIS3DH, or any future
+bug — the device reboots and re-enters this state machine from a cold boot, rather than
+staying frozen indefinitely. See Software Architecture below.
 
 ### State Behaviours
 
 **OFF State:**
 - Both MOSFETs off (GPIO held LOW to prevent leakage)
 - Deep sleep after 60 seconds of inactivity
-- Wake on touch interrupt (GPIO3 HIGH)
-- Minimal power draw (~22.5µA in deep sleep)
+- Wake source is mode-dependent: button (`BUTTON_PIN` HIGH) in button mode, accelerometer
+  tap (`LIS3DH_INT_PIN` HIGH) in pot mode — the ESP32-C3 can't wake from an ADC threshold,
+  so the pot itself can never be the wake source
+- In pot mode, a wake doesn't automatically turn the lamp on: it might just be a hand
+  bumping the lamp while reaching for the dial. On wake, firmware takes a fresh pot
+  reading and only turns on if the pot itself is above the on-threshold; otherwise the
+  device goes straight back toward deep sleep
+- Minimal power draw (~21-27µA in deep sleep, both modes — see Power Budget Estimates)
 
 **ON State:**
 - Active mode is either WARM or COOL (hardware PWM via LEDC)
-- Restores last used mode and per-mode brightness (via RTC memory)
-- Single tap: turn off (smooth crossfade to 0)
-- Double tap: swap WARM↔COOL with crossfade to that mode's saved brightness
-- Long press (>800ms): adjust brightness continuously (gamma corrected, per-mode)
-  - Direction reverses on release for next hold
-  - Double flash at min/max boundary
-- Triple tap: play non-blocking battery level pulse indicator
-- Auto indicator on turn-on when battery is LOW or CRITICAL (touch blocked during playback)
+- Restores last used mode via RTC memory. Button mode also restores per-mode brightness
+  from RTC memory; pot mode never persists brightness — it's always just wherever the pot
+  currently points, live, with no "restore" concept
+- Pot mode: brightness eases toward the pot's live position with exponential smoothing, so
+  fast movements produce a smooth ramp instead of an instant jump; turning to/below the
+  off-threshold turns the lamp off
+- Button mode: single tap turns off (smooth crossfade to 0); long press (>800ms) adjusts
+  brightness continuously (gamma corrected, direction reverses on release, double flash at
+  min/max boundary); triple tap plays the non-blocking battery level pulse indicator
+- Double or triple tap on the lamp body (accelerometer, both modes): swap WARM↔COOL with
+  crossfade. A single tap is ignored — see Accelerometer Mode-Swap Gesture above
+- Auto battery indicator on turn-on when battery is LOW or CRITICAL, both modes. In button
+  mode the button's own gesture recognition is paused during playback
+  (`setTouchBlocked()`); in pot mode the pot keeps tracking live and the accelerometer
+  gesture keeps working throughout, since pot mode has no equivalent "block" concept —
+  brightness continuing to track during the animation is consistent with pot mode's
+  philosophy that the pot position is always the source of truth
 
 ### Battery State Machine
 
@@ -334,36 +444,55 @@ Replaces hard flashing with a smooth sine-envelope pulse. Pulse characteristics 
 | LOW | 2 (medium) | 500ms | 2.0 (moderate) |
 | CRITICAL | 1 (sharp) | 300ms | 5.0 (aggressive) |
 
-Plays on the currently active LED channel at the saved brightness (min 25%). Touch is blocked during playback and automatically unblocked when complete.
+Plays on the currently active LED channel at the current brightness (min 25%). In button mode the button's own gesture recognition is blocked during playback and automatically unblocked when complete; pot tracking and the accelerometer gesture are not paused in either mode (see State Behaviours above).
 
 ## Software Architecture
 
 ### Module Structure
 
-The firmware is organised into four modules plus main:
+The firmware is organised into five hardware modules plus main (see
+`doc/firmware_architecture.md` for full implementation detail — this is the summary):
 
 **config.h** - Centralised configuration:
-- Pin definitions for GPIO3 (touch), GPIO10 (white LED), GPIO5 (warm LED), GPIO0 (battery ADC)
-- Timing constants (debounce, long press, transitions, deep sleep timeout)
-- Brightness settings (max, min PWM, gamma correction value)
+- Pin definitions: GPIO3 (`POT_PIN`/`BUTTON_PIN`, shared), GPIO1 (`POT_POWER_PIN`), GPIO4
+  (LIS3DH interrupt), GPIO10/GPIO5 (LED PWM), GPIO0 (battery ADC), GPIO8/GPIO9 (I2C)
+- Timing constants (debounce, long press, transitions, deep sleep timeout, watchdog timeout)
+- Brightness settings (max, min PWM, gamma correction value, pot brightness slew)
 - Battery calibration factors (ADC correction, BMS voltage drop)
+- `USE_POT_INPUT` / `USE_ACCEL_INPUT` compile-time input-mode selection, with a build-time
+  check that rejects `USE_POT_INPUT` without `USE_ACCEL_INPUT` (no way to wake without it)
 
 **led_control** - LED state machine and PWM:
 - Two states: OFF / ON with MODE_WARM or MODE_COOL selector
-- Per-mode brightness memory (each mode remembers its own level)
+- Per-mode brightness memory in button mode (each mode remembers its own level); pot mode
+  doesn't persist brightness at all
 - Gamma-corrected brightness using a lookup table (γ = 2.2)
 - Smooth 400ms crossfade transitions (turn on/off and mode swap)
+- Continuous brightness-target tracking for pot mode (`setBrightnessTarget()` /
+  `updateBrightnessSlew()`), an exponential filter distinct from the crossfade above
 - ESP32 LEDC hardware PWM at 5kHz, 8-bit resolution
-- Boundary detection with double-flash feedback at min/max brightness
+- Boundary detection with double-flash feedback at min/max brightness (button mode)
 - PWM detach and GPIO hold for clean OFF state (prevents LED ghosting)
 - Non-blocking battery indicator pulse animation (sine-envelope, configurable sharpness)
 
-**touch_input** - Capacitive touch handling:
+**pot_input** - Potentiometer handling (pot mode):
+- ADC → brightness mapping (linear, with a top dead zone so the user can reliably reach
+  100% even if the pot doesn't hit its electrical limit exactly)
+- Two-threshold on/off hysteresis to prevent flicker at the "off" end of the dial
+- Whole-travel exponential noise filtering on the raw reading, upstream of the mapping and
+  the on/off decision — distinct from led_control's output-side brightness slew
+- Switched power (`potPowerOn()`/`potPowerOff()`) — no external transistor, drives
+  `POT_POWER_PIN` directly, since the pot's few-hundred-µA draw is trivial for a GPIO
+- All core logic (mapping, hysteresis, noise filter) is pure and unit tested
+
+**touch_input** - Physical button handling (button mode):
 - 50ms debouncing for stable state detection
 - Multi-tap gesture accumulator with 300ms window (single/double/triple tap)
 - 800ms threshold for long press with start/hold/end callbacks
 - Continuous brightness step every 30ms while holding
 - Touch blocking API for use during indicator animation
+- Hardware-agnostic input abstraction (`registerInputReader()`) — same gesture engine
+  the old TTP223 module used, unchanged, just reading a button now
 
 **battery_monitor** - Battery voltage monitoring:
 - 12-bit ADC with 11dB attenuation, 8-sample averaging
@@ -373,12 +502,26 @@ The firmware is organised into four modules plus main:
 - Brightness limiting to 50% in CRITICAL state
 - Reads every 30 seconds, displays every 60 seconds or on significant change
 
+**accel_input** - LIS3DH register-level I/O (both modes, optional in button mode):
+- I2C register read/write helpers and click-detection register configuration
+- The tap-counting gesture state machine itself (ring-suppress → gesture window →
+  double/triple-tap dispatch) lives in `main.cpp`'s `updateAccelInput()`, which calls into
+  this module for the actual I2C transactions
+
 **main.cpp** - Application entry point:
-- RTC memory persistence for savedMode, warmBrightness, coolBrightness, bootCount
+- RTC memory persistence for savedMode, warmBrightness/coolBrightness (button mode only),
+  bootCount
 - WiFi and Bluetooth disabled on startup for power savings
-- Registers 6 callbacks: single tap, double tap, triple tap, long press start/hold/end
-- On wake: restores last mode + brightness, shows auto battery indicator if needed
-- Handles deep sleep entry after 60s in OFF state
+- Task watchdog armed in `setup()`; `loop()` pets it every iteration — an I2C stall or any
+  future bug that blocks the loop triggers an automatic reboot instead of a frozen lamp
+- `Wire.setTimeOut()` bounds I2C transactions so a bus glitch fails fast instead of hanging
+- Button mode: registers 6 callbacks (single tap, double tap, triple tap, long press
+  start/hold/end). Pot mode: polls `updatePotControl()` every loop instead
+- On wake: pot mode takes a fresh reading and only turns on if the pot is requesting it;
+  button mode restores last mode + brightness directly. Both show the auto battery
+  indicator if needed
+- Handles deep sleep entry after 60s in OFF state, including releasing/re-latching
+  `gpio_hold` on the pot's power pin around sleep in pot mode
 - GPIO hold enable/disable for clean sleep/wake transitions
 
 ## Build Notes
@@ -396,6 +539,14 @@ The firmware is organised into four modules plus main:
 - **Battery holder:** Secure mounting, consider spring contacts vs solder tabs
 
 ### Testing Checklist
+
+These were verified against the original TTP223-based hardware. The current design
+(potentiometer/button + accelerometer + watchdog) has been built and tested in simulation
+(native unit tests, multi-configuration firmware builds) but **not yet flashed to real
+hardware** — the LED/battery/MOSFET items below carry over unchanged since that circuitry
+didn't change, but everything input-related needs re-verification on the new build.
+
+Carried over, unchanged circuitry:
 - [x] Verify voltage divider scaling (4.2V battery → ~1.042V at GPIO0 with 33kΩ)
 - [x] Confirm onboard regulator operates down to 3.0V input at 5V pin
 - [x] Test MOSFET switching at low battery voltages
@@ -403,26 +554,56 @@ The firmware is organised into four modules plus main:
 - [x] **CRITICAL:** Test LEDs are completely off in OFF state (no faint glow)
   - **During normal OFF state**: PWM detached, GPIO forced LOW
   - **During deep sleep**: `gpio_hold_en()` keeps GPIOs LOW
-- [x] Measure standby current in OFF state (target ~22.5µA)
 - [x] Verify charging indication on TP4056
-- [x] Test all state transitions (single tap ON/OFF, double tap WARM↔COOL)
-- [x] Verify brightness persists per mode through deep sleep cycle
-- [x] Verify battery indicator plays on turn-on when LOW/CRITICAL
-- [x] Test triple tap battery indicator at all battery levels
-- [x] Test brightness adjustment (hold to dim, gamma correction, boundary detection)
-- [x] Unit tests pass (9 tests for battery state machine)
+- [x] Test brightness adjustment gamma correction
+
+New/changed with the pot + accelerometer + watchdog redesign — not yet verified on hardware:
+- [ ] Verify pot brightness tracking feels right across the full travel (mapping, slew, and
+      the two noise filters — see `doc/firmware_architecture.md`)
+- [ ] Verify pot on/off hysteresis and top dead zone at the physical ends of travel
+- [ ] Verify `POT_POWER_PIN` actually de-powers the pot during sleep (probe the divider
+      voltage — should read ~0V asleep; see the pot power switch sanity check in
+      `analysis/README.md`)
+- [ ] Verify wake-then-check behavior: a bump wakes but doesn't turn on if the pot is off;
+      turning the pot up while reaching for it does turn it on
+- [ ] Verify a single accelerometer tap does nothing and a double/triple tap swaps mode, in
+      both input modes, including while adjusting the pot (should not trigger a swap)
+- [ ] Verify deep sleep wake via accelerometer tap (pot mode) and via button (button mode)
+- [ ] Measure standby current in OFF state in both input modes (target ~21-27µA each — see
+      Power Budget Estimates below; this is currently only a datasheet-math estimate)
+- [ ] Induce an I2C stall and confirm the task watchdog reboots the device instead of it
+      staying frozen
+- [ ] Button mode only: test all gesture state transitions (single tap ON/OFF, double tap
+      WARM↔COOL, long press brightness, triple tap battery indicator), verify brightness
+      persists per mode through deep sleep cycle
+- [ ] Verify battery indicator plays on turn-on when LOW/CRITICAL, both modes
+- [x] Unit tests pass (44 native tests: touch gestures, pot mapping/hysteresis/filtering,
+      battery state machine)
 - [ ] Measure runtime at different brightness levels
 
 ## Power Budget Estimates
 
-### OFF State (Sleep)
+All figures below are component-datasheet math, not yet measured on real hardware — see
+`analysis/` for the measurement methodology and `doc/firmware_architecture.md` for the full
+derivation, including how the potentiometer's own current draw was originally
+underestimated before `POT_POWER_PIN` (GPIO-switched pot supply, no transistor needed) was
+added to solve it.
+
+### OFF State (Sleep) — both input modes
+
 - ESP32-C3 deep sleep: ~10µA
-- TTP223 standby: ~1.5µA
 - Voltage divider: ~11µA (3.7V / 133kΩ with 100k+33k resistors)
-- **Total: ~22.5µA**
-- **Standby time with 2500mAh battery: ~12 years** (theoretical)
+- LIS3DH accelerometer: ~6µA (required in pot mode for wake; optional in button mode for
+  the mode-swap gesture)
+- Potentiometer: ~0µA in normal operation — `POT_POWER_PIN` switches its supply off during
+  sleep (without this, a 10kΩ pot wired straight across 3.3V/GND would add ~330µA,
+  dominating the whole budget over 10x)
+- Physical button: ~0µA always — no standby draw of its own
+- **Total: ~21-27µA in both modes** (27µA with the accelerometer enabled)
+- **Standby time with 2500mAh battery: ~10.5+ years** (theoretical, both modes)
 
 ### ON State (Active)
+
 - ESP32-C3 active: ~80mA (worst case)
 - White LED: ~20-50mA (estimate, depends on specs)
 - Warm LED: ~20-50mA (estimate)
@@ -464,15 +645,24 @@ Even though wireless features aren't initially needed:
 ### Essential
 - [ ] ESP32-C3 SuperMini (×2-3 for spares)
 - [ ] TP4056 USB-C charger modules (×3-5)
-- [ ] TTP223 capacitive touch modules (×5-10 pack)
+- [ ] 10kΩ **linear taper** potentiometer (×2-3 spares) — default primary control; must be
+  linear, not audio/log taper (brightness mapping is a straight linear function of the ADC
+  reading)
+- [ ] LIS3DH accelerometer breakout (e.g. SparkFun SEN-13963, ×2-3 spares) — mode-swap
+  gesture, and the deep-sleep wake source in potentiometer mode
+- [ ] Physical momentary pushbutton (×2-3) — only needed if building the button-mode
+  alternative instead of the potentiometer
 - [ ] 2N7000 or BS170 N-FETs (×10 pack)
 - [ ] 18650 Li-ion battery (2500-3000mAh, protected cells)
 - [ ] Resistor assortment (1/4W through-hole):
   - 2× 120Ω (MOSFET gate series resistors)
-  - 2× 10kΩ (MOSFET gate pull-down resistors)
+  - 2× 10kΩ (MOSFET gate pull-down resistors; also usable as the button's pull-down if
+    building button mode)
   - 1× 100kΩ (voltage divider high side)
   - 1× 33kΩ (voltage divider low side) - or 22kΩ alternative
+  - 1× 1kΩ (pot RC front end series resistor)
   - LED current limiting resistors (values TBD based on LED specs)
+- [ ] 1× 1µF ceramic capacitor, X7R, ≥6.3V (pot RC front end shunt cap)
 
 ### Nice to Have
 - [ ] 18650 battery holders (panel mount)
@@ -481,9 +671,38 @@ Even though wireless features aren't initially needed:
 - [ ] USB-C breakout boards
 - [ ] Small slide/toggle switches
 - [ ] Heatshrink tubing assortment
+- [ ] Knob/cap for the potentiometer shaft (panel-mount finish)
 
 ## Document Revision History
 
+- **v2.0** - Potentiometer input, accelerometer mode-swap gesture, task watchdog (major
+  input hardware redesign — not yet flashed to real hardware, see Testing Checklist):
+  - Replaced the TTP223 capacitive touch module with a compile-time choice of a
+    potentiometer (new default) or a physical momentary button, sharing GPIO3
+  - Potentiometer mode: live continuous brightness tracking (no persisted brightness),
+    on/off hysteresis and a top dead zone, two independent noise filters (input-side
+    exponential smoothing in `pot_input.cpp`, output-side brightness slew in
+    `led_control.cpp`), and an RC front end (1kΩ series, 1µF shunt) as an analog
+    complement to the digital filtering
+  - Added a LIS3DH accelerometer as an auxiliary input in both modes: a **double or triple**
+    tap on the lamp body swaps WARM ↔ COOL — a single tap is deliberately ignored so
+    turning the pot knob (which shakes the same enclosure the accelerometer is mounted to)
+    can't trigger an accidental mode swap. Also the sole deep-sleep wake source in
+    potentiometer mode, since the ESP32-C3 can't wake from an ADC threshold
+  - Added `POT_POWER_PIN`: the potentiometer's supply comes from a GPIO instead of the
+    fixed 3.3V rail, switched off during deep sleep, with no external transistor needed
+    (the pot's ~330µA draw is trivial for a GPIO to source directly) — this restores
+    potentiometer-mode standby power to the same ~21-27µA ballpark as button mode, instead
+    of the pot's own draw dominating the whole budget
+  - Added a software task watchdog (`esp_task_wdt`) and an I2C transaction timeout
+    (`Wire.setTimeOut()`) as defense against the firmware freezing — likely root cause of
+    previously reported freezes was an unbounded I2C call to the accelerometer blocking
+    the main loop indefinitely
+  - Reviewed every `millis()`-based timer for 32-bit rollover bugs (none found; all use the
+    standard wraparound-safe idiom) and fixed one real minor bug in the deep-sleep timer's
+    "not started" sentinel check
+  - Updated wiring diagrams (Mermaid + ASCII), state machine, module structure, testing
+    checklist, power budget, and bill of materials throughout this document to match
 - **v1.5** - Control scheme refactor (multi-tap gestures, RTC brightness memory, pulse indicator):
   - Replaced OFF/WHITE/WARM cycle with OFF/ON + MODE_WARM/MODE_COOL selector
   - Single tap toggles ON/OFF, double tap swaps mode, triple tap shows battery indicator

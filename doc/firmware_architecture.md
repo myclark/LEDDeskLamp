@@ -120,11 +120,13 @@ void injectInputEvent(bool pressed);  // for event-based sensors
 
 The LIS3DH never goes through the `InputStateReader`/`injectInputEvent()` path. It never
 drove on/off — that always went through the button's own gesture engine, or now the pot's
-state machine — so `main.cpp`'s `updateAccelInput()` just watches `LIS3DH_INT_PIN` directly
-and calls `handleDoubleTap()` (mode swap) on every detected tap, with a cooldown to ignore
-ring-down re-triggers. See `doc/accel_input_integration.md`. It's optional in button mode
-(comment out `USE_ACCEL_INPUT` to run button-only — double-tapping the button still swaps
-modes) but required in pot mode.
+state machine — so `main.cpp`'s `updateAccelInput()` just watches `LIS3DH_INT_PIN` directly.
+Mode swap requires a **double or triple tap**, not a single one: a lone tap is discarded as
+an incidental bump (turning the pot knob shakes the same enclosure the accelerometer is
+mounted to), and only counting 2+ taps within a firmware-side gesture window dispatches
+`handleDoubleTap()`. See `doc/accel_input_integration.md` for the full state machine. It's
+optional in button mode (comment out `USE_ACCEL_INPUT` to run button-only — double-tapping
+the button still swaps modes) but required in pot mode.
 
 **Deep sleep wake source:** `BUTTON_PIN HIGH` in button mode, `LIS3DH_INT_PIN HIGH` in pot
 mode — never both. Changing input hardware requires updating `enterDeepSleep()` in

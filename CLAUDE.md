@@ -52,7 +52,9 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 | Input | OFF | ON |
 |-------|-----|----|
 | Turn pot | Turning above the on-threshold turns on at that brightness | Brightness tracks pot position live (eased ramp); turning to/below the off-threshold turns off |
-| Tap lamp body (accelerometer) | No effect | Swap WARM ↔ COOL (crossfade) |
+| Double/triple tap lamp body (accelerometer) | No effect | Swap WARM ↔ COOL (crossfade) |
+
+A single tap on the lamp body is deliberately ignored (not just while OFF) — turning the pot knob shakes the same enclosure the accelerometer is mounted to, so requiring 2+ taps within the gesture window keeps ordinary brightness adjustment from randomly swapping modes.
 
 Brightness is never persisted — it's always just wherever the pot currently points. Battery indicator shows automatically on wake/turn-on when LOW/CRITICAL; there's no on-demand gesture for it.
 
@@ -65,7 +67,7 @@ Brightness is never persisted — it's always just wherever the pot currently po
 | Long press | — | Adjust brightness (direction reverses on release) |
 | Triple tap | — | Show battery level pulse |
 
-A tap on the lamp body (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only.
+A double or triple tap on the lamp body (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only; a single tap is ignored.
 
 Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (60 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer.
 

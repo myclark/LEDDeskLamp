@@ -174,30 +174,51 @@ static void debugClickSrc(uint8_t src) {
   DEBUG_PRINTLN("]");
 }
 
-// Non-blocking state machine. The accelerometer is now only an auxiliary trigger for the
-// mode-swap gesture (on/off/brightness/battery indicator all live on the physical button),
-// so there's no single-vs-double-tap discrimination to do any more: any detected tap swaps
-// the mode. A cooldown after dispatch suppresses ring-down re-triggers from the same tap.
+// Non-blocking state machine. Mode swap requires a double- or triple-tap — a single tap is
+// deliberately ignored, since the lamp body gets bumped constantly during ordinary use (in
+// pot mode especially: turning the knob shakes the enclosure the accelerometer is mounted
+// to). Counting to at least 2 before dispatching turns those incidental knocks into no-ops
+// while still recognizing an intentional multi-tap gesture.
+//
+//   IDLE/WAITING  → INT1 fires (Sclick) → tapCount++, RING_SUPPRESS (absorb this tap's ringing)
+//   RING_SUPPRESS → wait LIS3DH_RING_SUPPRESS_MS → WAITING (watch for the next tap)
+//   WAITING       → another tap arrives → back to RING_SUPPRESS; or
+//                   LIS3DH_GESTURE_WINDOW_MS passes with no new tap → window closes:
+//                     tapCount >= 2 → swap mode; tapCount == 1 → discarded as incidental
 static void updateAccelInput() {
-  enum AccelState { IDLE, COOLDOWN };
+  enum AccelState { IDLE, RING_SUPPRESS, WAITING };
   static AccelState state = IDLE;
-  static unsigned long stateStart = 0;
+  static uint8_t tapCount = 0;
+  static unsigned long lastTapTime = 0;
+  static unsigned long suppressStart = 0;
 
-  if (state == IDLE) {
-    if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
-      uint8_t src = accelReadClickSrc();
-      DEBUG_PRINT("ACCEL: tap detected: ");
-      debugClickSrc(src);
-      if ((src >> 4) & 0x01) {  // Sclick
-        DEBUG_PRINTLN("ACCEL: tap → swap mode");
-        handleDoubleTap();
-      }
-      stateStart = millis();
-      state = COOLDOWN;
+  if (state == RING_SUPPRESS) {
+    if (millis() - suppressStart >= LIS3DH_RING_SUPPRESS_MS) {
+      state = WAITING;
     }
-  } else {
-    if (millis() - stateStart >= LIS3DH_COOLDOWN_MS) {
-      state = IDLE;
+    return;  // Ignore INT1 entirely while suppressing this tap's ring-down
+  }
+
+  if (state == WAITING && millis() - lastTapTime >= LIS3DH_GESTURE_WINDOW_MS) {
+    if (tapCount >= 2) {
+      DEBUG_PRINTLN("ACCEL: multi-tap → swap mode");
+      handleDoubleTap();
+    } else {
+      DEBUG_PRINTLN("ACCEL: single tap ignored (need a double/triple tap to swap mode)");
+    }
+    tapCount = 0;
+    state = IDLE;
+  }
+
+  if (digitalRead(LIS3DH_INT_PIN) == HIGH) {
+    uint8_t src = accelReadClickSrc();
+    DEBUG_PRINT("ACCEL: tap detected: ");
+    debugClickSrc(src);
+    if ((src >> 4) & 0x01) {  // Sclick
+      tapCount++;
+      lastTapTime = millis();
+      suppressStart = millis();
+      state = RING_SUPPRESS;
     }
   }
 }
