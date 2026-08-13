@@ -5,6 +5,7 @@
 
 unsigned long millis() { return 0; }
 int analogRead(uint8_t pin) { return 0; }
+void digitalWrite(uint8_t pin, uint8_t val) {}
 void delay(unsigned long ms) {}
 void pinMode(uint8_t pin, uint8_t mode) {}
 void analogReadResolution(uint8_t bits) {}

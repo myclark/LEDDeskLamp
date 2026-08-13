@@ -10,6 +10,8 @@ static unsigned long lastFilterUpdateTime = 0;
 static bool filterInitialized = false;
 
 void initPotInput() {
+  pinMode(POT_POWER_PIN, OUTPUT);
+  potPowerOn();
   pinMode(POT_PIN, INPUT);
   // battery_monitor's initBatteryMonitor() already configures these globally, but set
   // them here too so pot behavior doesn't depend on module init order.
@@ -18,6 +20,11 @@ void initPotInput() {
   filterInitialized = false;
   DEBUG_PRINTLN("Pot input initialized");
 }
+
+// Direct GPIO drive, no external switch transistor — see the POT_POWER_PIN comment in
+// config.h for why this is electrically fine at the pot's ~330µA draw.
+void potPowerOn() { digitalWrite(POT_POWER_PIN, HIGH); }
+void potPowerOff() { digitalWrite(POT_POWER_PIN, LOW); }
 
 // Pure mapping, no hardware access — testable directly. Snaps to the extremes within
 // POT_MAX_DEADZONE of the top so the user can reliably reach exactly MAX_BRIGHTNESS even

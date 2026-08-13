@@ -47,8 +47,23 @@ analysis/
    - Optional: if you want to compare white vs warm LEDs
 
 4. **OFF (deep sleep)**
-   - Should be ~26µA constant across voltage range
+   - Should be ~21-27µA constant across voltage range in both input modes — see
+     `doc/firmware_architecture.md`'s Power Management section for the theoretical
+     breakdown. This is currently only a datasheet-math estimate, not a measured one, so
+     it's worth confirming on real hardware.
+   - In potentiometer mode specifically, this number depends on `POT_POWER_PIN` actually
+     cutting the pot's supply during sleep (see test 5) — if that's not working as intended
+     (bad `gpio_hold_en()`, wiring mistake), you'd see the pot's own ~330µA (10kΩ pot) added
+     on top, which is easy to spot: a reading in the hundreds of µA instead of tens.
    - Validates standby power consumption
+
+5. **OFF (deep sleep), pot power switch sanity check** *(potentiometer mode only)*
+   - Same as test 4, but specifically to confirm `POT_POWER_PIN` is actually de-powering
+     the pot during sleep rather than leaving it floating or still driven — probe the
+     voltage across the pot's divider directly (should read ~0V while asleep) alongside the
+     current measurement. If the switch isn't latching correctly this is the fastest way to
+     catch it, since the symptom (an extra ~330µA on the current reading) is otherwise easy
+     to misattribute to something else.
 
 ### Additional Tests (Optional)
 

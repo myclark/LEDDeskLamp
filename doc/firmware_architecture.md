@@ -47,7 +47,8 @@ brightness, always.
   forever (see Timeout Audit & Watchdog below for why that distinction matters).
 - **Wake-then-check:** since the accelerometer (not the pot) wakes the device from deep
   sleep, a wake doesn't automatically mean "turn on" — it might just be a hand bumping the
-  lamp while reaching for the dial. On `ESP_SLEEP_WAKEUP_GPIO`, `setup()` takes a fresh pot
+  lamp while reaching for the dial. On `ESP_SLEEP_WAKEUP_GPIO`, `setup()` re-powers the pot
+  (see below), waits `POT_SETTLE_MS` for the RC front end to settle, then takes a fresh pot
   reading and only turns on if the pot itself is requesting ON; otherwise the device stays
   OFF-but-awake and the normal deep-sleep timer puts it straight back to sleep, invisibly
   to the user.
@@ -55,28 +56,28 @@ brightness, always.
   With no button, the accelerometer tap is the *only* way to wake the device; without it,
   the lamp would sleep forever once it entered deep sleep.
 
-#### Hardware: pot + RC front end
+#### Hardware: pot + RC front end + switched power
 
-Analog complement to the digital filtering above — see the `POT_PIN` comment in `config.h`
-for the same values inline with the pinout.
+Analog complement to the digital filtering above — see the `POT_PIN`/`POT_POWER_PIN`
+comments in `config.h` for the same values inline with the pinout.
 
 ```
-3.3V ──────┬──────────────┐
-           │              │
-         [ POT ]          │
-           │              │
-   wiper ──┴──[ R 1kΩ ]──┬──► POT_PIN (GPIO3)
-                          │
-                        [ C 1µF ]
-                          │
-GND ────────────────────┴──── (pot's other outer leg also to GND)
+POT_POWER_PIN (GPIO1) ──┬──────────────┐
+                         │              │
+                       [ POT ]          │
+                         │              │
+                 wiper ──┴──[ R 1kΩ ]──┬──► POT_PIN (GPIO3)
+                                        │
+                                      [ C 1µF ]
+                                        │
+GND ──────────────────────────────────┴──── (pot's other outer leg also to GND)
 ```
 
 - **Pot: 10kΩ linear taper.** Must be linear, not audio/log — `mapPotToBrightness()` is a
   straight linear map, so a log-taper pot would make brightness feel badly non-uniform
-  across the travel. 10kΩ keeps source impedance low (for ADC accuracy) and idle current
-  low (3.3V / 10kΩ ≈ 330µA whenever powered — the figure assumed in the Power Management
-  estimate below).
+  across the travel. 10kΩ is chosen purely for ADC accuracy (low source impedance) — its
+  ~330µA draw (3.3V / 10kΩ) is no longer a standby-power concern now that `POT_POWER_PIN`
+  switches it off during sleep, so there's no reason to trade accuracy for a higher value.
 - **Series R: 1kΩ**, wiper to `POT_PIN`. Keeps total source impedance (pot's own ~2.5kΩ
   worst case at mid-travel + this 1kΩ) comfortably under the ESP32 ADC's recommended limit
   for accurate 12-bit conversions.
@@ -87,6 +88,19 @@ GND ────────────────────┴──── 
   source, ~20 dB/decade past cutoff on a single-pole filter). The two filters are
   independent and can be retuned separately: raise C (e.g. 2.2–4.7µF) for more analog
   filtering, or lower `POT_FILTER_TIME_CONSTANT_MS` for more digital filtering.
+- **Switched power, no transistor needed:** the pot's "3.3V" leg wires to `POT_POWER_PIN`
+  (a GPIO) instead of the fixed rail. At the pot's ~330µA draw, the GPIO driver's own
+  on-resistance drop is a few mV at most — well inside ESP32-C3's GPIO sourcing capability
+  (tens of mA) — so driving the pin HIGH is electrically indistinguishable from tying it to
+  3.3V directly; no external switch transistor is required. `pot_input.cpp`'s
+  `potPowerOn()`/`potPowerOff()` are plain `digitalWrite()` calls. `POT_POWER_PIN` must be
+  RTC-capable (GPIO0-5 on the ESP32-C3) so `gpio_hold_en()`/`gpio_hold_dis()` can latch it
+  LOW through deep sleep — the same technique already used for the LED pins in
+  `enterDeepSleep()`. `main.cpp` releases the hold *before* `initPotInput()` reconfigures
+  the pin on wake (a held pin ignores `pinMode()`/`digitalWrite()` until released), then
+  waits `POT_SETTLE_MS` (≈5x the RC front end's worst-case time constant, with margin)
+  before the first reading is trusted — this covers both a deep-sleep wake and a fresh
+  power-on, since `initPotInput()` (and thus `potPowerOn()`) always runs during `setup()`.
 
 ### Button mode (`USE_POT_INPUT` commented out)
 
@@ -153,8 +167,26 @@ Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LO
 
 **Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, `turnOff()` is called; deep sleep timer then starts. `lastInteractionTime` is updated in every gesture callback and on wake from deep sleep.
 
-**Estimated power:**
-- Deep sleep: ~10 µA (ESP32-C3) + ~6 µA (LIS3DH, stays in low-power ODR mode — required for wake in pot mode, used for the mode-swap gesture in button mode) + 11 µA (divider) ≈ 27 µA. A physical button draws no standby current; a potentiometer draws a small continuous current across its resistive track whenever the divider is powered (negligible at typical 10kΩ+ pot values, but non-zero unlike a button — budget it in if the pot ends up wired directly across the rail rather than only sampled).
+**Estimated power (component-datasheet math — not yet measured on real hardware; see `analysis/`):**
+
+Base deep-sleep budget, both modes: ~10 µA (ESP32-C3) + 11 µA (battery divider) ≈ 21 µA.
+Add ~6 µA if `USE_ACCEL_INPUT` is enabled (LIS3DH stays in low-power ODR mode — required
+for wake in pot mode, optional for the mode-swap gesture in button mode) → ~27 µA.
+
+- **Button mode:** no additional standby draw — a button has none. ~21–27 µA total →
+  roughly 10.5–13.5 years theoretical on a 2500 mAh cell (12.5–16 years at 3000 mAh).
+- **Pot mode:** a 10kΩ pot left wired straight across 3.3V/GND would draw
+  V/R = 3.3V/10kΩ ≈ 330 µA continuously — deep sleep included, over 10x the rest of the
+  standby budget combined. `POT_POWER_PIN` (see the Hardware section above) avoids this
+  entirely by switching the pot's supply off during sleep, so pot mode's standby draw is
+  the same ~21–27 µA base budget as button mode (LIS3DH is required here, so realistically
+  ~27 µA — same decade-plus theoretical figure). This is why the pot is kept at 10kΩ rather
+  than traded for a higher-resistance part: with the switch, standby power is solved
+  without giving up any ADC accuracy.
+  - This was previously (incorrectly) analyzed as an unavoidable ~330 µA standby cost with
+    "negligible" framing that undersold it, and briefly considered trading pot resistance
+    for lower power before landing on the switch instead — worth knowing if you see older
+    numbers referenced elsewhere (e.g. old PR/commit history).
 - ON at 50% PWM: 60–90 mA → ~28–40 h runtime (2500 mAh)
 - ON at 100% PWM: 120–180 mA → ~14–20 h runtime
 

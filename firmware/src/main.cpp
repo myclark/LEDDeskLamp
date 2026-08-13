@@ -248,9 +248,20 @@ void setup() {
   // Check wakeup reason before module init
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
+#ifdef USE_POT_INPUT
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+    // Release the hold before initPotInput() reconfigures this pin — a held pin won't
+    // respond to pinMode()/digitalWrite() until the hold is explicitly disabled.
+    gpio_hold_dis((gpio_num_t)POT_POWER_PIN);
+  }
+#endif
+
   // Initialize modules
 #ifdef USE_POT_INPUT
   initPotInput();
+  // Let the RC front end settle before trusting any reading — covers both this wake path
+  // and a fresh power-on, since initPotInput() (and thus potPowerOn()) always runs here.
+  delay(POT_SETTLE_MS);
 #else
   initTouch();
 #endif
@@ -433,6 +444,11 @@ void enterDeepSleep() {
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
 
 #ifdef USE_POT_INPUT
+  // Cut power to the pot's divider and latch it LOW through sleep — see the
+  // POT_POWER_PIN comment in config.h for why this needs no external switch transistor.
+  potPowerOff();
+  gpio_hold_en((gpio_num_t)POT_POWER_PIN);
+
   // No physical button in this configuration — the accelerometer tap is the sole wake
   // source (config.h enforces USE_ACCEL_INPUT whenever USE_POT_INPUT is defined).
   esp_deep_sleep_enable_gpio_wakeup(1ULL << LIS3DH_INT_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);

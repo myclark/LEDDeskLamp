@@ -26,19 +26,39 @@
 // (Same active-HIGH polarity as the old TTP223 module, so touch_input.cpp needs no changes.)
 #define BUTTON_PIN 3         // Physical button input; also the deep-sleep wake pin (button mode)
 //
-// POT_PIN: potentiometer wiper. Outer legs to 3.3V and GND, wiper to POT_PIN (ADC1-capable).
-// Fully counter-clockwise = OFF, fully clockwise = MAX_BRIGHTNESS.
+// POT_PIN: potentiometer wiper. Wire one outer leg to POT_POWER_PIN (below, NOT the fixed
+// 3.3V rail) and the other to GND; wiper to POT_PIN (ADC1-capable). Fully counter-clockwise
+// = OFF, fully clockwise = MAX_BRIGHTNESS.
 //
 // Recommended part + RC front end (analog complement to the digital filtering in
 // pot_input.cpp — see POT_FILTER_TIME_CONSTANT_MS below):
 //   - 10kΩ LINEAR taper pot (not audio/log — mapPotToBrightness() is a straight linear
-//     map, so a log-taper pot would make brightness feel badly non-uniform across travel)
+//     map, so a log-taper pot would make brightness feel badly non-uniform across travel).
+//     10kΩ is chosen for best ADC accuracy (low source impedance) — its standby current is
+//     no longer a tradeoff now that POT_POWER_PIN switches it off during deep sleep, so
+//     there's no reason to trade accuracy for a higher-value pot.
 //   - Wiper -> 1kΩ series resistor -> POT_PIN, then a 1µF ceramic cap from POT_PIN to GND.
 //     ~160Hz cutoff: ~30x faster than the digital filter (doesn't add felt lag) and ~30x
 //     below the 5kHz LED PWM frequency (knocks that noise source down significantly).
 //     Keeps total source impedance (pot's own ~2.5kΩ worst case + this 1kΩ) comfortably
 //     under the ESP32 ADC's recommended limit for accurate 12-bit reads.
 #define POT_PIN 3            // Potentiometer wiper input (pot mode)
+//
+// POT_POWER_PIN: powers the pot's divider directly from a GPIO instead of the fixed 3.3V
+// rail, so it can be switched off during deep sleep — without it, a 10kΩ pot left wired
+// across 3.3V/GND draws ~330µA continuously (deep sleep included), over 10x the rest of
+// the standby budget. No external switch transistor is needed: at the pot's ~330µA draw,
+// the GPIO driver's on-resistance drop is a few mV at most, well within ESP32-C3's GPIO
+// sourcing capability (tens of mA) — driving the pin HIGH is electrically indistinguishable
+// from tying it to the 3.3V rail at this current level. Must be an RTC-capable pin (0-5 on
+// ESP32-C3) so gpio_hold_en()/gpio_hold_dis() can latch it LOW through sleep, same pattern
+// already used for the LED pins in enterDeepSleep(). GPIO1 is the only one of 0-5 not
+// otherwise spoken for (0=battery ADC, 2=strapping/avoid, 3=POT_PIN, 4=LIS3DH INT, 5=warm LED).
+#define POT_POWER_PIN 1      // Switched power for the pot divider (pot mode only)
+// Settle time after powering the pot back on (wake or cold boot) before the first reading
+// is trusted — must clear the RC front end's worst-case settling time (~5x its ~3.5ms time
+// constant ≈ 17.5ms); comfortable margin above that.
+#define POT_SETTLE_MS 25
 #define WHITE_LED_PIN 10    // White LED control (PWM)
 #define WARM_LED_PIN 5      // Warm LED control (PWM) - GPIO5 is safe (GPIO9 is strapping pin)
 #define BATTERY_PIN 0       // Battery voltage monitoring (ADC1_CH0)
