@@ -18,9 +18,25 @@ brightness, always.
 
 - **Mapping:** raw ADC (0–4095 at 12-bit resolution) → brightness (0–`MAX_BRIGHTNESS`)
   linearly via `mapPotToBrightness()`.
-- **On/off hysteresis:** two thresholds (`POT_OFF_THRESHOLD` ~3%, `POT_ON_HYSTERESIS` ~5%)
-  prevent flicker right at the "off" end of the dial — see `updatePotStateMachine()` in
-  `pot_input.cpp`, which is pure/testable and covered by `test/test_pot/`.
+- **On/off hysteresis (bottom of the dial):** two thresholds (`POT_OFF_THRESHOLD` ~3%,
+  `POT_ON_HYSTERESIS` ~5%) prevent flicker right at the "off" end — see
+  `updatePotStateMachine()` in `pot_input.cpp`.
+- **Top dead zone:** mirrors the bottom at the other end — `mapPotToBrightness()` snaps
+  anything within `POT_MAX_DEADZONE` (~3%) of full scale to exactly `MAX_BRIGHTNESS`, since
+  a pot rarely hits its mechanical/electrical limit exactly and the user should still be
+  able to reach 100% by feel. This one is a plain value clamp inside the mapping function
+  itself, not a separate state machine — unlike the bottom, crossing it isn't a functional
+  state change.
+- **Whole-travel noise filtering:** `smoothPotReading()` applies exponential smoothing to
+  the pot's reading every tick, before it feeds into either the on/off decision or the
+  brightness target — this is distinct from (and happens *before*) the brightness slew
+  below, and matters at every dial position, not just the two ends: without it, a single
+  noisy ADC sample could transiently cross the on/off hysteresis boundary or produce a
+  visible flicker in the middle of the travel. `POT_FILTER_TIME_CONSTANT_MS` (30 ms) is
+  intentionally much shorter than the brightness slew's time constant — it exists to erase
+  single-tick jitter, not to add perceptible lag.
+- All three of `mapPotToBrightness()`, `updatePotStateMachine()`, and `smoothPotReading()`
+  are pure functions with no hardware access, covered by `test/test_pot/`.
 - **Brightness slew:** `main.cpp` calls `setBrightnessTarget()` with the live pot reading
   every tick; `led_control.cpp`'s `updateBrightnessSlew()` eases the actual PWM output
   toward that target with an exponential filter (`BRIGHTNESS_SLEW_TIME_CONSTANT_MS`), so
@@ -186,5 +202,5 @@ Tests include `.cpp` source files directly (not via linking). The mock Arduino e
 | Suite | File | Tests |
 |-------|------|-------|
 | Touch gestures (button mode) | `test/test_touch/test_touch_input.cpp` | 11 |
-| Pot mapping & hysteresis (pot mode) | `test/test_pot/test_pot_input.cpp` | 12 |
+| Pot mapping, hysteresis & filtering (pot mode) | `test/test_pot/test_pot_input.cpp` | 16 |
 | Battery state machine | `test/test_battery/test_battery_state_machine.cpp` | 15 |

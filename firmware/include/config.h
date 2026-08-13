@@ -91,9 +91,22 @@
 // POT_ON_HYSTERESIS to turn back on. Between the two, the lamp just holds its last state.
 #define POT_OFF_THRESHOLD 8          // ~3% of full scale
 #define POT_ON_HYSTERESIS 13         // ~5% of full scale
+// Top-end dead zone, mirroring the bottom: pots rarely hit their mechanical/electrical
+// limit exactly, so without this the user could never quite reach 100% by feel. Once the
+// mapped brightness is within this many units of MAX_BRIGHTNESS, it snaps to exactly
+// MAX_BRIGHTNESS. This is a plain value clamp (unlike the bottom, which needs a full
+// on/off hysteresis state machine since crossing it is a functional state change).
+#define POT_MAX_DEADZONE 8           // ~3% of full scale, same margin as POT_OFF_THRESHOLD
 // Minimum pot movement (brightness units) that counts as user interaction for the
 // auto-off timer — filters out ADC jitter that would otherwise reset it forever.
 #define POT_MOVEMENT_DEADBAND 2
+// General noise filtering across the whole travel (not just the two ends): exponential
+// smoothing applied to the pot's reading, tick to tick, before it's used for anything —
+// the on/off decision, the brightness target, all of it. Distinct from
+// BRIGHTNESS_SLEW_TIME_CONSTANT_MS, which shapes the visible ramp of the *output* PWM;
+// this smooths the *input* signal so ADC noise can't cause spurious on/off toggling or
+// target jitter at any dial position, not just near the endpoints.
+#define POT_FILTER_TIME_CONSTANT_MS 30
 
 // Battery voltage thresholds (volts)
 #define BATTERY_FULL 4.2

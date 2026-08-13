@@ -11,7 +11,7 @@ pio run                                  # Build
 pio run -t upload                        # Flash
 pio device monitor                       # Serial monitor (115200 baud)
 pio run -t upload && pio device monitor  # Flash + monitor
-pio test -e native                       # Run native unit tests (38 tests, no hardware needed)
+pio test -e native                       # Run native unit tests (44 tests, no hardware needed)
 ```
 
 **IDE note:** Clang errors about `Arduino.h`, `millis()`, `HIGH` etc. are expected — ESP32 symbols are only visible to PlatformIO, not the IDE analyser.
@@ -81,9 +81,11 @@ Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then de
 #define ADC_CALIBRATION_FACTOR 0.904 // Tune to match oscilloscope reading
 #define BMS_VOLTAGE_DROP 0.090       // TP4056 MOSFET drop (~90 mV)
 #define WATCHDOG_TIMEOUT_MS 8000     // Reboots if loop() stalls this long (see Timeout Audit & Watchdog in doc/firmware_architecture.md)
-#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 150  // Pot mode: eased brightness follow speed
+#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 150  // Pot mode: eased brightness follow speed (output)
+#define POT_FILTER_TIME_CONSTANT_MS 30  // Pot mode: raw ADC noise filter, all positions (input)
 #define POT_OFF_THRESHOLD 8          // Pot mode: brightness units at/below which lamp turns off
 #define POT_ON_HYSTERESIS 13         // Pot mode: brightness units at/above which lamp turns on
+#define POT_MAX_DEADZONE 8           // Pot mode: snaps to MAX_BRIGHTNESS within this margin of full scale
 ```
 
 Battery thresholds (`BATTERY_LOW_THRESHOLD`, `BATTERY_CRITICAL_THRESHOLD`, etc.) and all pulse animation params are also in `config.h`.

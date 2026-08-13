@@ -18,5 +18,6 @@ uint8_t getPotBrightnessTarget();  // Current brightness the pot is pointing at 
 // Pure logic, exposed for unit testing (bypasses the real ADC read):
 uint8_t mapPotToBrightness(int rawAdc);
 bool updatePotStateMachine(bool currentlyOn, uint8_t mappedBrightness);
+float smoothPotReading(float current, float rawTarget, unsigned long dtMs);
 
 #endif // POT_INPUT_H
