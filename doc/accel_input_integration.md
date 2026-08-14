@@ -48,13 +48,20 @@ a task watchdog (`esp_task_wdt`) is also armed as a backstop that reboots the de
 
 ## config.h Values
 
-All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_CTRL_REG1`,
-timing registers, pins) live in `firmware/include/config.h` — that file is the source of
-truth; don't duplicate values here where they can drift out of sync. Current defaults use
-single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the hardware doesn't do any
-double-tap discrimination (ring-down from one physical tap falls within its own double-tap
-window, making every tap look like a Dclick) — the multi-tap gesture is counted in firmware
-instead, from a sequence of single-tap events. See Gesture Behaviour below.
+All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_WAKE_CLICK_THS`,
+`LIS3DH_CTRL_REG1`, timing registers, pins) live in `firmware/include/config.h` — that file
+is the source of truth; don't duplicate values here where they can drift out of sync.
+Current defaults use single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the
+hardware doesn't do any double-tap discrimination (ring-down from one physical tap falls
+within its own double-tap window, making every tap look like a Dclick) — the multi-tap
+gesture is counted in firmware instead, from a sequence of single-tap events. See Gesture
+Behaviour below.
+
+`CLICK_THS` specifically is reprogrammed at runtime between two values rather than staying
+fixed: `LIS3DH_CLICK_THS` (conservative) while awake, `LIS3DH_WAKE_CLICK_THS` (more
+sensitive) only while asleep in pot mode, via `accelSetClickThreshold()`. See "While OFF or
+asleep" below and the "Wake tap sensitivity vs. gesture tap sensitivity" section of
+`doc/firmware_architecture.md`.
 
 ---
 
@@ -99,11 +106,16 @@ while OFF, same as double-tapping the button while OFF).
 
 **Pot mode:** an accelerometer tap is the *only* thing that wakes the device from deep
 sleep — `LIS3DH_INT_PIN` is configured as the `esp_deep_sleep_enable_gpio_wakeup` source.
-A wake doesn't automatically turn the lamp on, though: it might just be a hand bumping the
-lamp while reaching for the dial. On wake, `setup()` clears the latched interrupt, takes a
-fresh reading of the pot, and only calls `turnOn()` if the pot itself is requesting ON —
-otherwise the device goes straight back toward deep sleep, invisibly to the user. See the
-Potentiometer mode section in `doc/firmware_architecture.md`.
+Right before sleeping, `enterDeepSleep()` reprograms `CLICK_THS` to the more sensitive
+`LIS3DH_WAKE_CLICK_THS` so a gentle jostle is enough to trigger the wake interrupt — much
+lower than `LIS3DH_CLICK_THS`, the threshold used for the deliberate tap gesture while
+awake. A wake doesn't automatically turn the lamp on, though: it might just be a hand
+bumping the lamp while reaching for the dial. On wake, `setup()` clears the latched
+interrupt, takes a fresh reading of the pot, and only calls `turnOn()` if the pot itself is
+requesting ON — otherwise the device goes straight back toward deep sleep, invisibly to the
+user (and `accelInit()`, which already runs unconditionally every boot, has by then already
+reprogrammed `CLICK_THS` back to the normal `LIS3DH_CLICK_THS` for the next gesture). See
+the Potentiometer mode section in `doc/firmware_architecture.md`.
 
 ---
 
@@ -146,6 +158,19 @@ void lis3dh_init() {
 }
 ```
 
+This runs unconditionally on every boot — including right after waking from deep sleep —
+so it always restores `CLICK_THS` to `LIS3DH_CLICK_THS` before `loop()` starts, even though
+`enterDeepSleep()` had temporarily lowered it to `LIS3DH_WAKE_CLICK_THS` just before this
+boot's sleep. Outside of `accelInit()`, the only other register write is that one targeted
+threshold swap:
+
+```cpp
+// Called by main.cpp's enterDeepSleep(), right before esp_deep_sleep_start()
+void accelSetClickThreshold(uint8_t ths) {
+    writeReg(0x3A, ths);
+}
+```
+
 To read and clear the interrupt:
 
 ```cpp
@@ -179,6 +204,13 @@ physically mounted in the lamp body:
   turning the dial), raise it. This is the first knob to reach for if single incidental
   bumps are registering as taps often enough to matter — the firmware-side exact-tap-count
   requirement (below) is the second line of defense, not a replacement for a sane threshold.
+  Only takes effect while awake — see `LIS3DH_WAKE_CLICK_THS` below for the sleeping case.
+- **`LIS3DH_WAKE_CLICK_THS`** — the threshold used only while asleep in pot mode, so a slow
+  or gentle jostle reliably wakes the device (a false wake just costs a little battery; a
+  missed one means physically power-cycling the lamp, a much worse failure mode, so this
+  should generally stay noticeably more sensitive than `LIS3DH_CLICK_THS`). Lower it further
+  if the lamp still doesn't wake from a light jostle; raise it if it's waking on its own from
+  ambient vibration (e.g. a desk fan, footsteps) with nothing actually touching it.
 - **`ACCEL_MODE_SWAP_TAP_COUNT`** — which exact tap count (2 or 3) drives the mode swap; the
   other is left completely unbound for a future gesture. Not really a "tuning" value in the
   empirical sense — pick it once based on which physical gesture you want to reserve, not

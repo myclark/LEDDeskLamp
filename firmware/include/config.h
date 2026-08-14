@@ -85,10 +85,20 @@
 // Maximum brightness for testing (0-255)
 // Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
 #define MAX_BRIGHTNESS 255
-#define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output value (prevents LED completely off)
+// Minimum PWM output floor (prevents the LED going fully dark while ON), expressed in
+// MAX_BRIGHTNESS-equivalent (0-255) units for readability — led_control.cpp scales this to
+// the actual PWM duty resolution (PWM_RESOLUTION, currently 12-bit), so it stays a consistent
+// ~0.4% duty-cycle floor regardless of that resolution.
+#define MIN_BRIGHTNESS_PWM 1
 
 // Brightness configuration
-#define GAMMA_CORRECTION 2.2        // Gamma curve for perceptual brightness (2.0-2.5 typical)
+// Gamma curve for perceptual brightness (2.0-2.5 typical). The gamma-corrected PWM output
+// itself now has more resolution than this 0-255 input domain (see PWM_RESOLUTION in
+// led_control.cpp) specifically so the low end of this curve — which a power-law gamma
+// compresses hardest — doesn't collapse onto too few distinct PWM codes and feel steppy.
+// Retune this value by ear on real hardware if the low/mid/high thirds still feel uneven
+// after that; it's independent of the resolution fix.
+#define GAMMA_CORRECTION 2.2
 #define BRIGHTNESS_STEP_MS 30       // Time between brightness increments when holding (continuous)
 #define MODE_TRANSITION_MS 400      // Smooth fade duration when changing modes
 // Exponential smoothing time constant for live brightness tracking (potentiometer mode).
@@ -241,7 +251,26 @@
                                     // from single-tap (Sclick) events instead.
 #define LIS3DH_CLICK_THS     0x10   // ~256 mg threshold — hardware-verified during bring-up
                                     // (commit bbe2f1b); 0x20 is too insensitive to register
-                                    // real taps on this enclosure.
+                                    // real taps on this enclosure. Used whenever the device is
+                                    // awake, for the double/triple-tap mode-swap gesture — this
+                                    // one is deliberately conservative to reject incidental
+                                    // bumps (see ACCEL_MODE_SWAP_TAP_COUNT below).
+#define LIS3DH_WAKE_CLICK_THS 0x08  // ~125 mg — more sensitive threshold used ONLY while
+                                    // asleep (main.cpp's enterDeepSleep() reprograms CLICK_THS
+                                    // to this right before esp_deep_sleep_start(), via
+                                    // accelSetClickThreshold()), so a slow/gentle jostle
+                                    // reliably wakes the device even though it wouldn't
+                                    // register as a deliberate tap while awake. Waking doesn't
+                                    // turn the lamp on by itself — setup() checks the pot
+                                    // position first (see doc/firmware_architecture.md,
+                                    // "Wake-then-check") — so a spurious wake here just costs a
+                                    // little battery, not a false power-on. accelInit() resets
+                                    // CLICK_THS back to LIS3DH_CLICK_THS on every boot, before
+                                    // any gesture detection runs, so this lower threshold never
+                                    // leaks into normal double-tap operation. Needs the same
+                                    // kind of on-hardware tuning as LIS3DH_CLICK_THS above —
+                                    // lower further if slow jostling still doesn't wake it,
+                                    // raise if it wakes from ambient vibration alone.
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
 #define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window — physical enclosures ring
                                     // longer than 60ms; a shorter window rejects real taps.

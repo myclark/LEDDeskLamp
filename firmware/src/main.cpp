@@ -516,6 +516,16 @@ void enterDeepSleep() {
   digitalWrite(WARM_LED_PIN, LOW);
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
 
+#ifdef USE_ACCEL_INPUT
+  // Switch to a more sensitive tap threshold before sleeping so a gentle jostle reliably
+  // wakes the device. LIS3DH_CLICK_THS (used while awake) is deliberately conservative to
+  // reject incidental bumps during the double/triple-tap gesture — too insensitive for a
+  // deep-sleep wake tap. accelInit() reprograms this back to LIS3DH_CLICK_THS on the very
+  // next boot, before any gesture detection runs, so the lower threshold never leaks into
+  // normal operation.
+  accelSetClickThreshold(LIS3DH_WAKE_CLICK_THS);
+#endif
+
 #ifdef USE_POT_INPUT
   // Cut power to the pot's divider and latch it LOW through sleep — see the
   // POT_POWER_PIN comment in config.h for why this needs no external switch transistor.

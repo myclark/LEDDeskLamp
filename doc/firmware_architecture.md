@@ -141,9 +141,29 @@ same `handleModeSwap()`) but required in pot mode.
 mode — never both. Changing input hardware requires updating `enterDeepSleep()` in
 `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
 
+**Wake tap sensitivity vs. gesture tap sensitivity:** in pot mode the same LIS3DH click
+engine that detects the awake double/triple-tap gesture also has to detect the tap that
+wakes the device from deep sleep, but those two situations want different sensitivity.
+`LIS3DH_CLICK_THS` (config.h) is deliberately conservative while awake, tuned to reject
+incidental bumps — the lamp body gets knocked constantly by ordinary handling, especially
+turning the pot knob. That same threshold is too insensitive for a deep-sleep wake tap,
+where the goal is the opposite: even a gentle jostle should wake the device, since a false
+wake costs a little battery (the device just checks the pot and, finding it still at OFF,
+goes straight back to sleep — see "Wake-then-check" above) while a missed wake means
+physically power-cycling the lamp. `enterDeepSleep()` reprograms the LIS3DH's `CLICK_THS`
+register to the more sensitive `LIS3DH_WAKE_CLICK_THS` right before calling
+`esp_deep_sleep_start()`, via `accelSetClickThreshold()` (`accel_input.cpp`) — a targeted
+single-register write, not a full reinit. On the next boot, `accelInit()` unconditionally
+reprograms every LIS3DH register including `CLICK_THS`, resetting it back to the normal
+`LIS3DH_CLICK_THS` before `loop()` (and therefore any gesture detection) ever runs — so the
+more sensitive wake threshold never leaks into normal double-tap operation, and no explicit
+"restore" step is needed on the wake path itself.
+
 ## Brightness Control
 
-**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS`, gamma = 2.2. `MIN_BRIGHTNESS_PWM` (= 1) prevents fully off while ON. LUT entry [0] = 0 for OFF transitions.
+**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS` (the 0-255 "brightness" domain pot/button input and every threshold in `config.h` operate in), gamma = 2.2. LUT entry [0] = 0 for OFF transitions.
+
+**PWM output resolution (12-bit) vs. brightness domain (8-bit):** the LUT's *output* is a 12-bit PWM duty (0–4095, `PWM_MAX_DUTY` in `led_control.cpp`), not a 0-255 value — deliberately 16x finer than the brightness domain it's indexed by. A gamma=2.2 curve compresses the bottom quarter or so of the 0-255 input range down to a tiny slice of the output range; if that output were also only 8-bit, that slice collapsed onto a handful of distinct PWM codes (single digits), which read as visibly steppy at low brightness and made the low→medium transition feel weak compared to medium→high (there simply weren't enough codes to represent it smoothly). Widening only the *output* resolution fixes that without changing the input resolution (still whatever the pot/button provides) or the gamma curve's shape. `MIN_BRIGHTNESS_PWM` (config.h, in the same 0-255 brightness-equivalent units) is scaled to this 12-bit range internally (`MIN_PWM_DUTY`) so the "never fully off while ON" floor stays a consistent ~0.4% duty cycle regardless of `PWM_RESOLUTION`. `getCompensatedPWM()`'s return type and every PWM-carrying variable downstream of it (`boundaryFlashPWM`, the crossfade `current*PWM`/`target*PWM` floats, etc.) are sized/cast for the wider range accordingly — `ledcWrite()` itself already accepts a duty of any width.
 
 **Continuous dimming (button mode):** hold → increment/decrement every `BRIGHTNESS_STEP_MS` (30 ms). Direction reverses on release. Double-flash (non-blocking) on boundary hit.
 

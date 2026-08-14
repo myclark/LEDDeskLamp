@@ -62,3 +62,7 @@ void accelInit() {
 uint8_t accelReadClickSrc() {
     return readReg(0x39);  // Reading CLICK_SRC clears the latched INT1
 }
+
+void accelSetClickThreshold(uint8_t ths) {
+    writeReg(0x3A, ths);
+}
