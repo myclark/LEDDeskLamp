@@ -32,6 +32,13 @@ void pinMode(uint8_t pin, uint8_t mode);
 void analogReadResolution(uint8_t bits);
 void analogSetAttenuation(uint8_t attenuation);
 
+// LEDC PWM (led_control.cpp) — signatures match the real esp32-hal-ledc.h closely enough
+// for native testing; only the pieces led_control.cpp actually calls are declared here.
+void ledcSetup(uint8_t channel, uint32_t freq, uint8_t resolutionBits);
+void ledcAttachPin(uint8_t pin, uint8_t channel);
+void ledcDetachPin(uint8_t pin);
+void ledcWrite(uint8_t channel, uint32_t duty);
+
 #else
 // ESP32 platform - use real Arduino.h from framework
 #include_next <Arduino.h>

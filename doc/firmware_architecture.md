@@ -362,3 +362,18 @@ Tests include `.cpp` source files directly (not via linking). The mock Arduino e
 | Touch gestures (button mode) | `test/test_touch/test_touch_input.cpp` | 11 |
 | Pot mapping, hysteresis & filtering (pot mode) | `test/test_pot/test_pot_input.cpp` | 16 |
 | Battery state machine | `test/test_battery/test_battery_state_machine.cpp` | 15 |
+| LED/brightness — battery ceiling clamp | `test/test_led_control/test_led_control.cpp` | 9 |
+
+**`test_led_control`** is the one suite that includes `led_control.cpp` itself (alongside
+`battery_monitor.cpp`, since `getCompensatedPWM()`/`clampToBatteryLimit()` call into it) —
+needed to reach `led_control.cpp`'s `static` helpers and to observe the actual PWM duty via
+mocked `ledcWrite()`, added to `test/Arduino.h` alongside the other LEDC mocks
+(`ledcSetup`/`ledcAttachPin`/`ledcDetachPin`) for this suite. Unlike the other suites, it
+makes `millis()` a controllable fake clock (a settable variable, not hardcoded to `0`) so it
+can drive the time-based brightness slew deterministically — advancing it by
+`~10 * BRIGHTNESS_SLEW_TIME_CONSTANT_MS` in one jump is enough for the exponential ease to
+fully settle without simulating every intermediate tick. Covers: `clampToBatteryLimit()`
+directly (NORMAL/LOW/CRITICAL, and that it's a ceiling, not a rescale, for requests already
+under the limit), plus an end-to-end sweep — pot held at max, battery state degrading
+NORMAL → LOW → CRITICAL → NORMAL underneath it with the target never changing — asserting
+both the applied `brightness` and the `ledcWrite()`-observed duty at each stage.

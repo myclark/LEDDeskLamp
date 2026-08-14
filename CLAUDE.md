@@ -11,7 +11,7 @@ pio run                                  # Build
 pio run -t upload                        # Flash
 pio device monitor                       # Serial monitor (115200 baud)
 pio run -t upload && pio device monitor  # Flash + monitor
-pio test -e native                       # Run native unit tests (44 tests, no hardware needed)
+pio test -e native                       # Run native unit tests (53 tests, no hardware needed)
 ```
 
 **IDE note:** Clang errors about `Arduino.h`, `millis()`, `HIGH` etc. are expected — ESP32 symbols are only visible to PlatformIO, not the IDE analyser.
