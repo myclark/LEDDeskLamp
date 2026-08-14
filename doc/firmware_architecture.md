@@ -161,9 +161,43 @@ more sensitive wake threshold never leaks into normal double-tap operation, and 
 
 ## Brightness Control
 
-**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS` (the 0-255 "brightness" domain pot/button input and every threshold in `config.h` operate in), gamma = 2.2. LUT entry [0] = 0 for OFF transitions.
+**End-to-end resolution:** the full signal path from the pot's ADC read to the final PWM write is 12-bit throughout, with no intermediate rounding down to a coarser domain anywhere in between:
 
-**PWM output resolution (12-bit) vs. brightness domain (8-bit):** the LUT's *output* is a 12-bit PWM duty (0–4095, `PWM_MAX_DUTY` in `led_control.cpp`), not a 0-255 value — deliberately 16x finer than the brightness domain it's indexed by. A gamma=2.2 curve compresses the bottom quarter or so of the 0-255 input range down to a tiny slice of the output range; if that output were also only 8-bit, that slice collapsed onto a handful of distinct PWM codes (single digits), which read as visibly steppy at low brightness and made the low→medium transition feel weak compared to medium→high (there simply weren't enough codes to represent it smoothly). Widening only the *output* resolution fixes that without changing the input resolution (still whatever the pot/button provides) or the gamma curve's shape. `MIN_BRIGHTNESS_PWM` (config.h, in the same 0-255 brightness-equivalent units) is scaled to this 12-bit range internally (`MIN_PWM_DUTY`) so the "never fully off while ON" floor stays a consistent ~0.4% duty cycle regardless of `PWM_RESOLUTION`. `getCompensatedPWM()`'s return type and every PWM-carrying variable downstream of it (`boundaryFlashPWM`, the crossfade `current*PWM`/`target*PWM` floats, etc.) are sized/cast for the wider range accordingly — `ledcWrite()` itself already accepts a duty of any width.
+```
+ADC read          "brightness"           gamma LUT              PWM duty
+0-4095 (12-bit) -> 0-MAX_BRIGHTNESS -> (4096-entry table, -> 0-PWM_MAX_DUTY
+(POT_ADC_MAX)      (config.h,           computed in float)     (12-bit,
+                    = POT_ADC_MAX,                              PWM_RESOLUTION
+                    = PWM_MAX_DUTY)                              in led_control.cpp)
+```
+
+`MAX_BRIGHTNESS`, `POT_ADC_MAX`, and `PWM_RESOLUTION`'s `PWM_MAX_DUTY` are all deliberately
+set to the same value (4095) — `mapPotToBrightness()` (`pot_input.cpp`) turns into a pure
+identity mapping (once the raw ADC reading is clamped to range), so the pot's full ADC
+resolution passes through untouched. This used to be a real bottleneck: `brightness` was a
+`uint8_t` (0-255) even though the ADC read 12-bit and gamma correction was computed in
+float — every pot reading got crushed from 4096 possible positions down to only 256
+distinguishable brightness levels *before* gamma or the PWM stage ever saw it, no matter how
+much resolution either of those had downstream. Widening `brightness` itself (and everything
+that carries it — the gamma LUT's index, the brightness slew target, the RTC-persisted
+per-mode brightness in button mode, etc.) to match removes that bottleneck; only the actual
+*mark on the dial* (which gesture, which gamma curve) matters now, not an accidental
+resolution loss partway through.
+
+**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS`, 4096 entries, gamma = 2.2 —
+`calculateGammaLUT()` computes each entry with `pow()` in float for precision, then caches
+the rounded result so `getCompensatedPWM()` doesn't call `pow()` on every PWM update. LUT
+entry [0] = 0 for OFF transitions. `MIN_BRIGHTNESS_PWM` (config.h, in `MAX_BRIGHTNESS`-
+equivalent units) is scaled internally to `MIN_PWM_DUTY` so the "never fully off while ON"
+floor stays a consistent ~0.4% duty cycle even if `PWM_RESOLUTION` and `MAX_BRIGHTNESS` are
+ever changed independently (today they're numerically equal, so the scaling is a no-op).
+
+**Button-mode step size:** `incrementBrightness()`'s discrete step (button-mode long-press
+dimming) is `BRIGHTNESS_STEP_SIZE` units per `BRIGHTNESS_STEP_MS` tick, not a literal 1 —
+scaled up by the same factor `MAX_BRIGHTNESS` grew by (255 -> 4095) so a full-range
+dim/brighten sweep still takes the same real-world time as before the resolution change.
+Only the pot's *live* tracking needed the full domain; button mode's discrete stepping just
+needed to not get 16x slower by accident.
 
 **Continuous dimming (button mode):** hold → increment/decrement every `BRIGHTNESS_STEP_MS` (30 ms). Direction reverses on release. Double-flash (non-blocking) on boundary hit.
 
@@ -267,13 +301,13 @@ support whichever Arduino core version is in use.
 
 ## RTC Memory Persistence
 
-Survives deep sleep; lost on battery disconnect. Defaults (WARM, 50%) apply after disconnect.
+Survives deep sleep; lost on battery disconnect. Defaults (WARM, full brightness) apply after disconnect.
 
 ```cpp
-RTC_DATA_ATTR uint8_t savedMode      = MODE_WARM;
-RTC_DATA_ATTR uint8_t warmBrightness = 128;
-RTC_DATA_ATTR uint8_t coolBrightness = 128;
-RTC_DATA_ATTR uint16_t bootCount     = 0;  // debug
+RTC_DATA_ATTR uint8_t  savedMode      = MODE_WARM;
+RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;  // = MAX_BRIGHTNESS
+RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t bootCount      = 0;  // debug
 ```
 
 `warmBrightness`/`coolBrightness` are only meaningful in button mode, where brightness is

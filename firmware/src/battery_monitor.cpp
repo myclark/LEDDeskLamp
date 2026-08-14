@@ -61,7 +61,7 @@ float getLastBatteryVoltage() {
   return lastBatteryVoltage;
 }
 
-uint8_t getBatteryLimitedMaxBrightness() {
+uint16_t getBatteryLimitedMaxBrightness() {
   if (currentBatteryState == BATTERY_CRITICAL) {
     return CRITICAL_MAX_BRIGHTNESS;
   }

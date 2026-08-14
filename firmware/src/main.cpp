@@ -17,8 +17,8 @@
 
 // RTC-persistent variables (survive deep sleep, lost on battery disconnect)
 RTC_DATA_ATTR uint8_t savedMode = MODE_WARM;
-RTC_DATA_ATTR uint8_t warmBrightness = DEFAULT_BRIGHTNESS;
-RTC_DATA_ATTR uint8_t coolBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t bootCount = 0;
 
 // Forward declarations
@@ -28,7 +28,7 @@ void enterDeepSleep();
 static unsigned long lastInteractionTime = 0;
 
 // Helper: pointer to the brightness variable for a given mode
-static uint8_t* getModeBrightness(uint8_t mode) {
+static uint16_t* getModeBrightness(uint8_t mode) {
   return (mode == MODE_WARM) ? &warmBrightness : &coolBrightness;
 }
 
@@ -88,7 +88,7 @@ void handleModeSwap() {
 #ifdef USE_POT_INPUT
   // Brightness isn't stored per mode in pot mode — it's always just wherever the pot
   // currently points, so swap to that rather than a remembered value.
-  uint8_t target = getPotBrightnessTarget();
+  uint16_t target = getPotBrightnessTarget();
   swapMode(savedMode, target);
   setBrightnessTarget(target);
 #else
@@ -140,8 +140,8 @@ void handleLongPressEnd() {
 static void updatePotControl() {
   updatePotInput();
   bool wantsOn = isPotRequestingOn();
-  uint8_t target = getPotBrightnessTarget();
-  static uint8_t lastInteractionTarget = 0;
+  uint16_t target = getPotBrightnessTarget();
+  static uint16_t lastInteractionTarget = 0;
 
   if (wantsOn && currentLampState != ON) {
     DEBUG_PRINTLN(">>> POT: requesting ON");
@@ -352,7 +352,7 @@ void setup() {
     updatePotInput();
     if (isPotRequestingOn()) {
       lastInteractionTime = millis();
-      uint8_t target = getPotBrightnessTarget();
+      uint16_t target = getPotBrightnessTarget();
       turnOnAtZero(savedMode);
       setBrightnessTarget(target);
 

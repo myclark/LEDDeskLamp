@@ -82,24 +82,38 @@
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
 #define BMS_VOLTAGE_DROP 0.090        // TP4056 MOSFET voltage drop (~90mV)
 
-// Maximum brightness for testing (0-255)
-// Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
-#define MAX_BRIGHTNESS 255
+// Ceiling of the "brightness" domain that pot/button input, gamma correction, and every
+// brightness-relative threshold below operate in. Deliberately set to 4095 (12-bit) to
+// exactly match POT_ADC_MAX below (the pot's raw ADC resolution) and PWM_RESOLUTION in
+// led_control.cpp (the PWM hardware's duty resolution) — the full chain is now
+// ADC(12-bit) -> brightness(12-bit) -> gamma LUT(4096 entries, computed in float) ->
+// PWM(12-bit), with no intermediate rounding down to a coarser domain anywhere in between.
+// mapPotToBrightness() (pot_input.cpp) relies on this equality to pass the ADC's full
+// resolution through with zero precision loss. If you ever change one of these three
+// (this, POT_ADC_MAX, or led_control.cpp's PWM_RESOLUTION) independently, the others still
+// work correctly (mapPotToBrightness() and the gamma LUT both scale generically), you just
+// stop getting the "no precision lost anywhere" property.
+#define MAX_BRIGHTNESS 4095
 // Minimum PWM output floor (prevents the LED going fully dark while ON), expressed in
-// MAX_BRIGHTNESS-equivalent (0-255) units for readability — led_control.cpp scales this to
-// the actual PWM duty resolution (PWM_RESOLUTION, currently 12-bit), so it stays a consistent
-// ~0.4% duty-cycle floor regardless of that resolution.
-#define MIN_BRIGHTNESS_PWM 1
+// MAX_BRIGHTNESS-equivalent units for readability — led_control.cpp scales this to the
+// actual PWM duty resolution (PWM_RESOLUTION, currently 12-bit, currently identical to
+// MAX_BRIGHTNESS so this scaling is a no-op today), so it stays a consistent ~0.4%
+// duty-cycle floor regardless of that resolution.
+#define MIN_BRIGHTNESS_PWM 16
 
 // Brightness configuration
-// Gamma curve for perceptual brightness (2.0-2.5 typical). The gamma-corrected PWM output
-// itself now has more resolution than this 0-255 input domain (see PWM_RESOLUTION in
-// led_control.cpp) specifically so the low end of this curve — which a power-law gamma
-// compresses hardest — doesn't collapse onto too few distinct PWM codes and feel steppy.
-// Retune this value by ear on real hardware if the low/mid/high thirds still feel uneven
-// after that; it's independent of the resolution fix.
+// Gamma curve for perceptual brightness (2.0-2.5 typical). Retune this value by ear on real
+// hardware if the low/mid/high thirds of the pot's travel feel uneven — that's a property of
+// the curve's shape, independent of the domain resolution above.
 #define GAMMA_CORRECTION 2.2
 #define BRIGHTNESS_STEP_MS 30       // Time between brightness increments when holding (continuous)
+// How many brightness units incrementBrightness() (button mode long-press) moves per
+// BRIGHTNESS_STEP_MS tick. Scaled up from the old 1-unit-per-tick step (back when
+// MAX_BRIGHTNESS was 255) by the same factor MAX_BRIGHTNESS grew by, so a full-range
+// dim/brighten sweep still takes the same real-world time as before — only the pot's live
+// tracking actually needed the wider domain; button mode's discrete stepping just needs to
+// not get 16x slower by accident.
+#define BRIGHTNESS_STEP_SIZE (MAX_BRIGHTNESS / 255)
 #define MODE_TRANSITION_MS 400      // Smooth fade duration when changing modes
 // Exponential smoothing time constant for live brightness tracking (potentiometer mode).
 // Larger = slower, dreamier follow; smaller = snappier/more direct. At this time constant,
@@ -135,23 +149,25 @@
 #define ADC_SAMPLE_COUNT 8           // Number of ADC samples to average for battery voltage
 
 // ── Potentiometer tuning (only relevant when USE_POT_INPUT is defined) ─────────
-#define POT_ADC_MAX 4095             // Full-scale ADC reading at 12-bit resolution
+// Full-scale ADC reading at 12-bit resolution. Deliberately equal to MAX_BRIGHTNESS above —
+// see the comment there for why.
+#define POT_ADC_MAX 4095
 #define POT_SAMPLE_COUNT 4           // ADC samples averaged per read (light denoise, no delay needed)
 // On/off hysteresis, in mapped brightness units (0..MAX_BRIGHTNESS), not raw ADC counts.
 // Two different thresholds prevent flicker right at the boundary: once ON, the pot must
 // drop to/below POT_OFF_THRESHOLD to turn off; once OFF, it must rise to/above the higher
 // POT_ON_HYSTERESIS to turn back on. Between the two, the lamp just holds its last state.
-#define POT_OFF_THRESHOLD 8          // ~3% of full scale
-#define POT_ON_HYSTERESIS 13         // ~5% of full scale
+#define POT_OFF_THRESHOLD 128        // ~3% of full scale
+#define POT_ON_HYSTERESIS 208        // ~5% of full scale
 // Top-end dead zone, mirroring the bottom: pots rarely hit their mechanical/electrical
 // limit exactly, so without this the user could never quite reach 100% by feel. Once the
 // mapped brightness is within this many units of MAX_BRIGHTNESS, it snaps to exactly
 // MAX_BRIGHTNESS. This is a plain value clamp (unlike the bottom, which needs a full
 // on/off hysteresis state machine since crossing it is a functional state change).
-#define POT_MAX_DEADZONE 8           // ~3% of full scale, same margin as POT_OFF_THRESHOLD
+#define POT_MAX_DEADZONE 128         // ~3% of full scale, same margin as POT_OFF_THRESHOLD
 // Minimum pot movement (brightness units) that counts as user interaction for the
 // auto-off timer — filters out ADC jitter that would otherwise reset it forever.
-#define POT_MOVEMENT_DEADBAND 2
+#define POT_MOVEMENT_DEADBAND 32
 // General noise filtering across the whole travel (not just the two ends): exponential
 // smoothing applied to the pot's reading, tick to tick, before it's used for anything —
 // the on/off decision, the brightness target, all of it. Distinct from
@@ -177,7 +193,7 @@
 #define CRITICAL_CONSECUTIVE_THRESHOLD 3  // Consecutive low readings before entering CRITICAL
 
 // Battery brightness limiting
-#define CRITICAL_MAX_BRIGHTNESS 64        // Max brightness in CRITICAL state (~25% of 255)
+#define CRITICAL_MAX_BRIGHTNESS 1024      // Max brightness in CRITICAL state (~25% of full scale)
 
 // Voltage divider ratio: (100kΩ + 33kΩ) / 33kΩ = 4.030
 #define VOLTAGE_DIVIDER_RATIO 4.030
@@ -190,7 +206,7 @@
 #define PROGRAMMING_MODE_MAX_PWM 128  // Cap at 50% when on USB power
 
 // Battery indicator pulse configuration
-#define PULSE_MIN_BRIGHTNESS 64      // Minimum brightness for pulse indicator (~25% of 255)
+#define PULSE_MIN_BRIGHTNESS 1024    // Minimum brightness for pulse indicator (~25% of full scale)
 
 // Pulse parameters per battery state: count, period (ms), sharpness (1.0=sine, higher=sharper)
 #define PULSE_NORMAL_COUNT 3
@@ -214,7 +230,7 @@
 #define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL * 60 * 1000)   // 5 min
 
 // Default brightness on first power-up (RTC memory cleared)
-#define DEFAULT_BRIGHTNESS 255
+#define DEFAULT_BRIGHTNESS MAX_BRIGHTNESS
 
 // ── Input mode selection ───────────────────────────────────────────────────
 // Primary control: choose exactly one physical input for on/off + brightness.
