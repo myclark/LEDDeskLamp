@@ -192,8 +192,16 @@
 // Battery state machine hysteresis
 #define CRITICAL_CONSECUTIVE_THRESHOLD 3  // Consecutive low readings before entering CRITICAL
 
-// Battery brightness limiting
-#define CRITICAL_MAX_BRIGHTNESS 1024      // Max brightness in CRITICAL state (~25% of full scale)
+// Battery brightness limiting — a hard ceiling on the *applied* brightness (not just a
+// hint), enforced once at the single point every brightness-setting path funnels through
+// (clampToBatteryLimit() in led_control.cpp), so it applies the same way no matter which
+// input mode or code path requested the brightness. In pot mode this feels like a
+// mechanical stop: turning the dial past the position that would request more than the
+// ceiling simply has no further effect — the existing LOW/CRITICAL indicator pulse is the
+// user's cue why. In button mode, incrementBrightness() additionally flashes the first time
+// a held long-press runs into the ceiling, same as hitting the true top of the range.
+#define LOW_MAX_BRIGHTNESS 2048            // Max brightness in LOW state (~50% of full scale)
+#define CRITICAL_MAX_BRIGHTNESS 1024       // Max brightness in CRITICAL state (~25% of full scale)
 
 // Voltage divider ratio: (100kΩ + 33kΩ) / 33kΩ = 4.030
 #define VOLTAGE_DIVIDER_RATIO 4.030

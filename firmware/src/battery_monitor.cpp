@@ -65,7 +65,10 @@ uint16_t getBatteryLimitedMaxBrightness() {
   if (currentBatteryState == BATTERY_CRITICAL) {
     return CRITICAL_MAX_BRIGHTNESS;
   }
-  return MAX_BRIGHTNESS;  // From config.h
+  if (currentBatteryState == BATTERY_LOW) {
+    return LOW_MAX_BRIGHTNESS;
+  }
+  return MAX_BRIGHTNESS;  // NORMAL, and CUTOFF (moot — the lamp refuses to turn on there)
 }
 
 float calculateCompensationFactor(float voltage) {

@@ -218,11 +218,33 @@ needed to not get 16x slower by accident.
 | State | Voltage | Behaviour |
 |-------|---------|-----------|
 | NORMAL | > 3.5 V | Full operation |
-| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, then recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
-| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at 50%, recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
+| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, brightness capped at `LOW_MAX_BRIGHTNESS` (~50%), recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
+| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at `CRITICAL_MAX_BRIGHTNESS` (~25%), recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
 | CUTOFF | < 3.0 V | Refuse to turn on, enter deep sleep |
 
 Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LOW needs > 3.3 V; CUTOFF→CRITICAL needs > 3.2 V (typically charging).
+
+**Brightness ceiling (LOW/CRITICAL), both modes:** `getBatteryLimitedMaxBrightness()`
+(`battery_monitor.cpp`) returns `LOW_MAX_BRIGHTNESS` / `CRITICAL_MAX_BRIGHTNESS` /
+`MAX_BRIGHTNESS` for the current state; `led_control.cpp`'s `clampToBatteryLimit()` is the
+single point every brightness-setting call site (`turnOn()`, `swapMode()`,
+`updateBrightnessSlew()`) funnels a requested brightness through before it's stored in the
+`brightness` variable that everything downstream (PWM, the battery indicator's own
+brightness, boundary flash) reads from — so the ceiling applies uniformly no matter which
+input mode or code path requested it. This used to only be enforced inside button mode's
+`incrementBrightness()` (and only for CRITICAL, not LOW) — pot mode's live tracking never
+went through it at all, so turning the pot to full still requested full brightness
+regardless of battery state.
+
+In pot mode this reads as a mechanical stop: `updateBrightnessSlew()` clamps the *value it
+applies* every tick, but lets `brightnessSlewCurrent` keep easing toward wherever the pot
+raw-points, uncapped, internally. Turning the dial past the position that would request more
+than the ceiling just has no further visible effect; turning back down, the still-continuous
+internal eased value crosses back under the cap and live tracking resumes with no jump or
+extra lag. In button mode, `incrementBrightness()` has its own equivalent inline clamp
+(rather than calling `clampToBatteryLimit()`) since it also needs to know *whether* a held
+long-press just hit the ceiling, to trigger the same boundary-flash feedback as hitting the
+true top of the range.
 
 **Battery indicator pulse:** non-blocking sine-envelope animation. Sharpness encodes urgency (1.0 = smooth sine, 5.0 = sharp spike). In button mode, the button's own gesture recognition is blocked while playing; pot tracking and the accelerometer gesture are never blocked in either mode.
 

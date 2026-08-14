@@ -9,6 +9,7 @@
 // Forward declarations
 static void triggerBoundaryFlash();
 static uint16_t getCompensatedPWM(uint16_t brightnessLevel);
+static uint16_t clampToBatteryLimit(uint16_t requested);
 
 // LEDC channels for ESP32 PWM
 #define WHITE_LED_CHANNEL 0
@@ -102,7 +103,7 @@ void turnOn(uint8_t mode, uint16_t brightnessLevel) {
 
   currentLampState = ON;
   currentMode = mode;
-  brightness = brightnessLevel;
+  brightness = clampToBatteryLimit(brightnessLevel);
 
   uint16_t pwmValue = getCompensatedPWM(brightness);
 
@@ -122,7 +123,7 @@ void turnOn(uint8_t mode, uint16_t brightnessLevel) {
   DEBUG_PRINT("ON: mode=");
   DEBUG_PRINT(mode == MODE_COOL ? "COOL" : "WARM");
   DEBUG_PRINT(", brightness=");
-  DEBUG_PRINTLN(brightnessLevel);
+  DEBUG_PRINTLN(brightness);
 }
 
 void turnOnAtZero(uint8_t mode) {
@@ -165,7 +166,7 @@ void swapMode(uint8_t newMode, uint16_t newBrightness) {
   if (currentLampState != ON) return;
 
   currentMode = newMode;
-  brightness = newBrightness;
+  brightness = clampToBatteryLimit(newBrightness);
 
   uint16_t pwmValue = getCompensatedPWM(brightness);
 
@@ -304,6 +305,18 @@ static uint16_t getCompensatedPWM(uint16_t brightnessLevel) {
   return compensatedPWM;
 }
 
+// Clamps a requested brightness to the current battery-imposed ceiling
+// (LOW_MAX_BRIGHTNESS / CRITICAL_MAX_BRIGHTNESS, config.h, via getBatteryLimitedMaxBrightness()
+// in battery_monitor.cpp) — the single point every brightness-setting call site funnels
+// through (turnOn(), swapMode(), updateBrightnessSlew()), so the ceiling applies the same way
+// no matter which input mode or code path requested the brightness. incrementBrightness()
+// (button mode) has its own equivalent logic inline, since it also needs to know *whether*
+// the request hit the ceiling in order to trigger the boundary flash.
+static uint16_t clampToBatteryLimit(uint16_t requested) {
+  uint16_t limit = getBatteryLimitedMaxBrightness();
+  return (requested > limit) ? limit : requested;
+}
+
 void updateModeTransition() {
   // Boundary flash state machine: off→on→off→on over 4 × BOUNDARY_FLASH_STEP_MS
   if (boundaryFlashActive) {
@@ -384,7 +397,12 @@ void updateBrightnessSlew() {
   float alpha = 1.0f - expf(-(float)dt / BRIGHTNESS_SLEW_TIME_CONSTANT_MS);
   brightnessSlewCurrent += ((float)brightnessSlewTarget - brightnessSlewCurrent) * alpha;
 
-  uint16_t newBrightness = (uint16_t)(brightnessSlewCurrent + 0.5f);
+  // brightnessSlewCurrent itself keeps easing toward wherever the pot raw-points, uncapped —
+  // only the value actually applied is clamped, right here. That's what gives the "stop on
+  // the dial" feel: holding the pot above the battery ceiling just holds the applied
+  // brightness at the ceiling; turning back down below it, the (still-continuous) eased
+  // value crosses back under the cap and tracking resumes with no jump.
+  uint16_t newBrightness = clampToBatteryLimit((uint16_t)(brightnessSlewCurrent + 0.5f));
   if (newBrightness == brightness) return;
 
   brightness = newBrightness;
