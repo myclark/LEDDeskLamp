@@ -48,20 +48,24 @@ a task watchdog (`esp_task_wdt`) is also armed as a backstop that reboots the de
 
 ## config.h Values
 
-All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`, `LIS3DH_WAKE_CLICK_THS`,
-`LIS3DH_CTRL_REG1`, timing registers, pins) live in `firmware/include/config.h` — that file
-is the source of truth; don't duplicate values here where they can drift out of sync.
-Current defaults use single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the
-hardware doesn't do any double-tap discrimination (ring-down from one physical tap falls
-within its own double-tap window, making every tap look like a Dclick) — the multi-tap
-gesture is counted in firmware instead, from a sequence of single-tap events. See Gesture
-Behaviour below.
+All LIS3DH register values (`LIS3DH_CLICK_CFG`, `LIS3DH_CLICK_THS`,
+`LIS3DH_WAKE_MOTION_THS_MG`, `LIS3DH_WAKE_MOTION_DURATION_MS`, `LIS3DH_CTRL_REG1`, timing
+registers, pins) live in `firmware/include/config.h` — that file is the source of truth;
+don't duplicate values here where they can drift out of sync. Current defaults use
+single-tap detection on all axes (`LIS3DH_CLICK_CFG = 0x15`); the hardware doesn't do any
+double-tap discrimination (ring-down from one physical tap falls within its own double-tap
+window, making every tap look like a Dclick) — the multi-tap gesture is counted in firmware
+instead, from a sequence of single-tap events. See Gesture Behaviour below.
 
-`CLICK_THS` specifically is reprogrammed at runtime between two values rather than staying
-fixed: `LIS3DH_CLICK_THS` (conservative) while awake, `LIS3DH_WAKE_CLICK_THS` (more
-sensitive) only while asleep in pot mode, via `accelSetClickThreshold()`. See "While OFF or
-asleep" below and the "Wake tap sensitivity vs. gesture tap sensitivity" section of
-`doc/firmware_architecture.md`.
+INT1 routing is reprogrammed at runtime between two entirely different detectors rather
+than staying fixed: the click/tap engine (`LIS3DH_CLICK_THS`) while awake, the separate
+AOI/IA1 motion-threshold generator (`LIS3DH_WAKE_MOTION_THS_MG`,
+`LIS3DH_WAKE_MOTION_DURATION_MS`) only while asleep in pot mode, via
+`accelConfigureWakeMotion()`. Unlike the click engine, the motion generator isn't
+tap-shaped — it fires on any axis exceeding the threshold for at least the configured
+duration, so a slow push or gentle rock wakes the device too, not just a sharp tap. See
+"While OFF or asleep" below and the "Wake sensitivity vs. gesture tap sensitivity" section
+of `doc/firmware_architecture.md`.
 
 ---
 
@@ -104,18 +108,20 @@ modes — there's no accelerometer gesture for it.
 `updateAccelInput()` ignores taps whenever `currentLampState != ON` (mode-swap is a no-op
 while OFF, same as double-tapping the button while OFF).
 
-**Pot mode:** an accelerometer tap is the *only* thing that wakes the device from deep
+**Pot mode:** accelerometer motion is the *only* thing that wakes the device from deep
 sleep — `LIS3DH_INT_PIN` is configured as the `esp_deep_sleep_enable_gpio_wakeup` source.
-Right before sleeping, `enterDeepSleep()` reprograms `CLICK_THS` to the more sensitive
-`LIS3DH_WAKE_CLICK_THS` so a gentle jostle is enough to trigger the wake interrupt — much
-lower than `LIS3DH_CLICK_THS`, the threshold used for the deliberate tap gesture while
-awake. A wake doesn't automatically turn the lamp on, though: it might just be a hand
-bumping the lamp while reaching for the dial. On wake, `setup()` clears the latched
-interrupt, takes a fresh reading of the pot, and only calls `turnOn()` if the pot itself is
-requesting ON — otherwise the device goes straight back toward deep sleep, invisibly to the
-user (and `accelInit()`, which already runs unconditionally every boot, has by then already
-reprogrammed `CLICK_THS` back to the normal `LIS3DH_CLICK_THS` for the next gesture). See
-the Potentiometer mode section in `doc/firmware_architecture.md`.
+Right before sleeping, `enterDeepSleep()` switches INT1 from the click engine to the
+motion-threshold generator via `accelConfigureWakeMotion(LIS3DH_WAKE_MOTION_THS_MG,
+LIS3DH_WAKE_MOTION_DURATION_MS)`, so any jostle above that threshold — not just a
+tap-shaped impulse — triggers the wake interrupt. A wake doesn't automatically turn the
+lamp on, though: it might just be a hand bumping the lamp while reaching for the dial. On
+wake, `setup()` clears the motion generator's latched interrupt (`accelReadInt1Src()`,
+reading `INT1_SRC` — a different register from the click engine's `CLICK_SRC`), takes a
+fresh reading of the pot, and only calls `turnOn()` if the pot itself is requesting ON —
+otherwise the device goes straight back toward deep sleep, invisibly to the user (and
+`accelInit()`, which already runs unconditionally every boot, has by then already
+reprogrammed INT1 back to the click engine for the next gesture). See the Potentiometer
+mode section in `doc/firmware_architecture.md`.
 
 ---
 
@@ -128,11 +134,14 @@ void lis3dh_init() {
     // ODR, low-power mode, axes
     writeReg(0x20, LIS3DH_CTRL_REG1);
 
-    // High-pass filter enabled for click only — reduces false triggers from
-    // slow tilts or vibration.  HPCLICK = bit 2.
-    writeReg(0x21, 0x04);
+    // High-pass filter for click (bit 2) and for the motion-wake generator
+    // (HPIS1, bit 0) — without HPIS1 the motion generator would compare
+    // against raw, gravity-included acceleration and sit permanently above
+    // any reasonable threshold on whichever axis is vertical.
+    writeReg(0x21, 0x05);
 
-    // Route click interrupt to INT1 pin.  I1_CLICK = bit 7.
+    // Route click interrupt to INT1 pin (the awake default). I1_CLICK = bit 7.
+    // enterDeepSleep() switches this to I1_IA1 (bit 6) right before sleeping.
     writeReg(0x22, 0x80);
 
     // FS = ±2g, no high-resolution mode (consistent with low-power ODR setting)
@@ -159,25 +168,36 @@ void lis3dh_init() {
 ```
 
 This runs unconditionally on every boot — including right after waking from deep sleep —
-so it always restores `CLICK_THS` to `LIS3DH_CLICK_THS` before `loop()` starts, even though
-`enterDeepSleep()` had temporarily lowered it to `LIS3DH_WAKE_CLICK_THS` just before this
-boot's sleep. Outside of `accelInit()`, the only other register write is that one targeted
-threshold swap:
+so it always restores INT1 routing to the click engine before `loop()` starts, even though
+`enterDeepSleep()` had temporarily switched it to the motion-wake generator just before this
+boot's sleep. Outside of `accelInit()`, the only other register writes are that one targeted
+reconfiguration:
 
 ```cpp
-// Called by main.cpp's enterDeepSleep(), right before esp_deep_sleep_start()
-void accelSetClickThreshold(uint8_t ths) {
-    writeReg(0x3A, ths);
+// Called by main.cpp's enterDeepSleep(), right before esp_deep_sleep_start().
+// Values given in mg/ms; converted to raw register units internally (16 mg and
+// 10 ms per LSB, fixed by the ±2g full-scale range and 100 Hz ODR set above).
+void accelConfigureWakeMotion(uint16_t ths_mg, uint16_t duration_ms) {
+    writeReg(0x32, ths_mg / 16);        // INT1_THS
+    writeReg(0x33, duration_ms / 10);   // INT1_DURATION
+    writeReg(0x30, 0x2A);               // INT1_CFG: OR of X/Y/Z high events
+    writeReg(0x22, 0x40);               // CTRL_REG3: route I1_IA1 to INT1
 }
 ```
 
-To read and clear the interrupt:
+To read and clear the click interrupt (while awake):
 
 ```cpp
 uint8_t src = readReg(0x39);   // CLICK_SRC — reading this clears the latch
 bool single_tap  = (src >> 4) & 0x01;  // Stap bit
 bool double_tap  = (src >> 5) & 0x01;  // Dtap bit
 // bool active   = (src >> 6) & 0x01;  // IA bit — any click event active
+```
+
+To read and clear the motion-wake interrupt (right after waking):
+
+```cpp
+uint8_t src = readReg(0x31);   // INT1_SRC — reading this clears that latch
 ```
 
 ---
@@ -204,13 +224,21 @@ physically mounted in the lamp body:
   turning the dial), raise it. This is the first knob to reach for if single incidental
   bumps are registering as taps often enough to matter — the firmware-side exact-tap-count
   requirement (below) is the second line of defense, not a replacement for a sane threshold.
-  Only takes effect while awake — see `LIS3DH_WAKE_CLICK_THS` below for the sleeping case.
-- **`LIS3DH_WAKE_CLICK_THS`** — the threshold used only while asleep in pot mode, so a slow
-  or gentle jostle reliably wakes the device (a false wake just costs a little battery; a
-  missed one means physically power-cycling the lamp, a much worse failure mode, so this
-  should generally stay noticeably more sensitive than `LIS3DH_CLICK_THS`). Lower it further
-  if the lamp still doesn't wake from a light jostle; raise it if it's waking on its own from
+  Only takes effect while awake — see `LIS3DH_WAKE_MOTION_THS_MG` below for the sleeping
+  case, which uses a different detector entirely.
+- **`LIS3DH_WAKE_MOTION_THS_MG`** — the motion threshold used only while asleep in pot mode
+  (given directly in mg, unlike the raw-register `LIS3DH_CLICK_THS`), so any jostle — not
+  just a tap — reliably wakes the device (a false wake just costs a little battery; a missed
+  one means physically power-cycling the lamp, a much worse failure mode, so this should
+  generally stay noticeably more sensitive than `LIS3DH_CLICK_THS`). Lower it further if the
+  lamp still doesn't wake from a light jostle; raise it if it's waking on its own from
   ambient vibration (e.g. a desk fan, footsteps) with nothing actually touching it.
+- **`LIS3DH_WAKE_MOTION_DURATION_MS`** — minimum time the motion has to stay above threshold
+  before the wake interrupt fires (also given directly in ms). Defaults to 0 (fires on the
+  very first sample over threshold) so a sharp tap still wakes it instantly, same as before.
+  Raise it if single-sample noise spikes are causing spurious wakes with nothing touching the
+  lamp — at 100 Hz ODR each additional 10 ms requires one more consecutive sample above
+  threshold.
 - **`ACCEL_MODE_SWAP_TAP_COUNT`** — which exact tap count (2 or 3) drives the mode swap; the
   other is left completely unbound for a future gesture. Not really a "tuning" value in the
   empirical sense — pick it once based on which physical gesture you want to reserve, not

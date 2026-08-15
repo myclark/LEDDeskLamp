@@ -141,23 +141,27 @@ same `handleModeSwap()`) but required in pot mode.
 mode — never both. Changing input hardware requires updating `enterDeepSleep()` in
 `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
 
-**Wake tap sensitivity vs. gesture tap sensitivity:** in pot mode the same LIS3DH click
-engine that detects the awake double/triple-tap gesture also has to detect the tap that
-wakes the device from deep sleep, but those two situations want different sensitivity.
-`LIS3DH_CLICK_THS` (config.h) is deliberately conservative while awake, tuned to reject
-incidental bumps — the lamp body gets knocked constantly by ordinary handling, especially
-turning the pot knob. That same threshold is too insensitive for a deep-sleep wake tap,
-where the goal is the opposite: even a gentle jostle should wake the device, since a false
-wake costs a little battery (the device just checks the pot and, finding it still at OFF,
-goes straight back to sleep — see "Wake-then-check" above) while a missed wake means
-physically power-cycling the lamp. `enterDeepSleep()` reprograms the LIS3DH's `CLICK_THS`
-register to the more sensitive `LIS3DH_WAKE_CLICK_THS` right before calling
-`esp_deep_sleep_start()`, via `accelSetClickThreshold()` (`accel_input.cpp`) — a targeted
-single-register write, not a full reinit. On the next boot, `accelInit()` unconditionally
-reprograms every LIS3DH register including `CLICK_THS`, resetting it back to the normal
-`LIS3DH_CLICK_THS` before `loop()` (and therefore any gesture detection) ever runs — so the
-more sensitive wake threshold never leaks into normal double-tap operation, and no explicit
-"restore" step is needed on the wake path itself.
+**Wake sensitivity vs. gesture tap sensitivity:** in pot mode the LIS3DH detects two
+different things depending on power state, and they want different sensitivity and even a
+different kind of detector. While awake, INT1 is routed to the click/tap engine that
+detects the double/triple-tap mode-swap gesture; `LIS3DH_CLICK_THS` (config.h) is
+deliberately conservative there, tuned to reject incidental bumps — the lamp body gets
+knocked constantly by ordinary handling, especially turning the pot knob — and the click
+engine only fires on a short, sharp, tap-shaped impulse in the first place. That's too
+narrow for a deep-sleep wake source, where the goal is the opposite: any jostle — a slow
+push, a gentle rock, not just a tap — should wake the device, since a false wake costs a
+little battery (the device just checks the pot and, finding it still at OFF, goes straight
+back to sleep — see "Wake-then-check" above) while a missed wake means physically
+power-cycling the lamp. `enterDeepSleep()` switches INT1 from the click engine to the
+LIS3DH's separate AOI/IA1 motion-threshold interrupt generator right before calling
+`esp_deep_sleep_start()`, via `accelConfigureWakeMotion(LIS3DH_WAKE_MOTION_THS_MG,
+LIS3DH_WAKE_MOTION_DURATION_MS)` (`accel_input.cpp`) — a few targeted register writes, not a
+full reinit. On the next boot, `accelInit()` unconditionally reprograms every LIS3DH
+register including INT1 routing, resetting it back to the click engine before `loop()` (and
+therefore any gesture detection) ever runs — so the motion-based wake source never leaks
+into normal double-tap operation, and no explicit "restore" step is needed on the wake path
+itself. The wake-clear read on that path (`accelReadInt1Src()`) reads the motion
+generator's own source register, not `CLICK_SRC` — it's a different latch.
 
 ## Brightness Control
 
@@ -323,7 +327,9 @@ support whichever Arduino core version is in use.
 
 ## RTC Memory Persistence
 
-Survives deep sleep; lost on battery disconnect. Defaults (WARM, full brightness) apply after disconnect.
+Survives deep sleep only. Any other reset — reflashing, a reset-button/EN-pin reset, or
+battery disconnect — reinitializes RTC memory from the declared defaults (WARM, full
+brightness), same as ordinary globals on a cold boot.
 
 ```cpp
 RTC_DATA_ATTR uint8_t  savedMode      = MODE_WARM;

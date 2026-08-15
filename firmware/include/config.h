@@ -3,7 +3,7 @@
 
 // Debug output control
 // Set to 1 to enable debug prints, 0 to disable
-#define DEBUG 0
+#define DEBUG 1
 
 #if DEBUG
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -123,7 +123,7 @@
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
 #define LONG_PRESS_MS 800
-#define DEEP_SLEEP_TIMEOUT_MS 60000     // Enter deep sleep after 1 minute in OFF state
+#define DEEP_SLEEP_TIMEOUT_MS 30000     // Enter deep sleep after 30 seconds in OFF state
 #define AUTO_OFF_ENABLED 1              // Set to 0 to disable auto-off
 #define AUTO_OFF_TIMEOUT_MS 14400000    // Auto-off after 4 hours with no interaction
 #define USB_CDC_INIT_DELAY_MS 100       // Delay for USB CDC enumeration on boot
@@ -133,6 +133,11 @@
 #define WATCHDOG_TIMEOUT_MS 8000
 // Bounds every Wire (I2C) transaction so a bus glitch on the accelerometer link can't
 // block loop() indefinitely — it fails fast instead and the watchdog above is just the backstop.
+// How often loop() logs a "still petting" confirmation in DEBUG builds. loop() pets the
+// watchdog on essentially every iteration (there's only a 1 ms delay at the bottom), so
+// logging every single pet would flood serial and could itself delay loop() enough to risk
+// tripping the very watchdog it's confirming — so this is throttled, not a per-pet log.
+#define WATCHDOG_PET_LOG_INTERVAL_MS 5000
 #define I2C_TIMEOUT_MS 50
 
 // Gesture detection
@@ -279,22 +284,23 @@
                                     // awake, for the double/triple-tap mode-swap gesture — this
                                     // one is deliberately conservative to reject incidental
                                     // bumps (see ACCEL_MODE_SWAP_TAP_COUNT below).
-#define LIS3DH_WAKE_CLICK_THS 0x08  // ~125 mg — more sensitive threshold used ONLY while
-                                    // asleep (main.cpp's enterDeepSleep() reprograms CLICK_THS
-                                    // to this right before esp_deep_sleep_start(), via
-                                    // accelSetClickThreshold()), so a slow/gentle jostle
-                                    // reliably wakes the device even though it wouldn't
-                                    // register as a deliberate tap while awake. Waking doesn't
-                                    // turn the lamp on by itself — setup() checks the pot
-                                    // position first (see doc/firmware_architecture.md,
-                                    // "Wake-then-check") — so a spurious wake here just costs a
-                                    // little battery, not a false power-on. accelInit() resets
-                                    // CLICK_THS back to LIS3DH_CLICK_THS on every boot, before
-                                    // any gesture detection runs, so this lower threshold never
-                                    // leaks into normal double-tap operation. Needs the same
-                                    // kind of on-hardware tuning as LIS3DH_CLICK_THS above —
-                                    // lower further if slow jostling still doesn't wake it,
-                                    // raise if it wakes from ambient vibration alone.
+// Wake source used ONLY while asleep: a plain "any axis exceeds this level" motion
+// interrupt (main.cpp's enterDeepSleep() programs this right before
+// esp_deep_sleep_start(), via accelConfigureWakeMotion()) — not the tap/click detector
+// used while awake, so it responds to a slow push or gentle rocking, not just a
+// tap-shaped impulse. Expressed directly in mg/ms rather than raw register units;
+// accelConfigureWakeMotion() converts them (see the mg/ms-per-LSB comments above
+// mgToThs()/msToDuration() in accel_input.cpp — both assume the fixed ±2g full-scale
+// range and 100 Hz ODR set in accelInit()). Waking doesn't turn the lamp on by itself —
+// setup() checks the pot position first (see doc/firmware_architecture.md,
+// "Wake-then-check") — so a spurious wake here just costs a little battery, not a false
+// power-on. accelInit() resets INT1 back to the tap/click detector on every boot, before
+// any gesture detection runs, so this never leaks into normal double-tap operation.
+// Needs the same kind of on-hardware tuning as LIS3DH_CLICK_THS above — lower if slow
+// jostling still doesn't wake it, raise if it wakes from ambient vibration alone.
+#define LIS3DH_WAKE_MOTION_THS_MG      128  // ~same magnitude as the tap-wake threshold it replaces
+#define LIS3DH_WAKE_MOTION_DURATION_MS 0    // 0 = fires on the first sample over threshold,
+                                             // so a sharp tap still wakes it instantly too
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
 #define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window — physical enclosures ring
                                     // longer than 60ms; a shorter window rejects real taps.

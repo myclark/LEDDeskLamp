@@ -15,7 +15,8 @@
 #include "accel_input.h"
 #endif
 
-// RTC-persistent variables (survive deep sleep, lost on battery disconnect)
+// RTC-persistent variables (survive deep sleep only — reset to their declared defaults on
+// any other reset, including a reflash, a reset-button/EN-pin reset, or battery disconnect)
 RTC_DATA_ATTR uint8_t savedMode = MODE_WARM;
 RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
@@ -274,7 +275,9 @@ static void initWatchdog() {
   if (addErr != ESP_OK && addErr != ESP_ERR_INVALID_STATE) {
     DEBUG_PRINTLN("WARNING: failed to subscribe loop task to watchdog");
   }
-  DEBUG_PRINTLN("Watchdog armed");
+  DEBUG_PRINT("Watchdog armed (timeout=");
+  DEBUG_PRINT(WATCHDOG_TIMEOUT_MS);
+  DEBUG_PRINTLN("ms)");
 }
 
 void setup() {
@@ -322,8 +325,9 @@ void setup() {
   accelInit();
   accelDumpConfig();
   // Flush any latched INT1 left over from before a reset/reflash so the first loop()
-  // iteration doesn't immediately read it as a fresh tap.
+  // iteration doesn't immediately read it as a fresh tap or motion-wake event.
   accelReadClickSrc();
+  accelReadInt1Src();
 #endif
 
 #ifndef USE_POT_INPUT
@@ -344,11 +348,13 @@ void setup() {
     gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
 
 #ifdef USE_POT_INPUT
-    // The accelerometer tap that woke us doesn't necessarily mean "turn on" — it might
-    // just be the bump of a hand reaching for the dial. Clear its latch, then take a
-    // fresh pot reading and let that decide: if the pot itself is still at OFF, stay OFF
-    // and let the deep-sleep timer below put the device straight back to sleep.
-    accelReadClickSrc();
+    // The motion that woke us doesn't necessarily mean "turn on" — it might just be the
+    // bump of a hand reaching for the dial. Clear its latch (accelInit() already switched
+    // INT1 routing back to the click detector, but the motion generator's own latch still
+    // needs an explicit read), then take a fresh pot reading and let that decide: if the
+    // pot itself is still at OFF, stay OFF and let the deep-sleep timer below put the
+    // device straight back to sleep.
+    accelReadInt1Src();
     updatePotInput();
     if (isPotRequestingOn()) {
       lastInteractionTime = millis();
@@ -490,6 +496,14 @@ void loop() {
   // Pet the watchdog — if loop() ever fails to reach here within WATCHDOG_TIMEOUT_MS
   // (e.g. an I2C hang), the device reboots instead of staying frozen.
   esp_task_wdt_reset();
+#if DEBUG
+  // Throttled confirmation, not a per-pet log — see WATCHDOG_PET_LOG_INTERVAL_MS (config.h).
+  static unsigned long lastWatchdogPetLog = 0;
+  if (millis() - lastWatchdogPetLog >= WATCHDOG_PET_LOG_INTERVAL_MS) {
+    DEBUG_PRINTLN("Watchdog pet");
+    lastWatchdogPetLog = millis();
+  }
+#endif
 
   delay(1);  // Minimal delay for smooth transitions
 }
@@ -517,13 +531,12 @@ void enterDeepSleep() {
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
 
 #ifdef USE_ACCEL_INPUT
-  // Switch to a more sensitive tap threshold before sleeping so a gentle jostle reliably
-  // wakes the device. LIS3DH_CLICK_THS (used while awake) is deliberately conservative to
-  // reject incidental bumps during the double/triple-tap gesture — too insensitive for a
-  // deep-sleep wake tap. accelInit() reprograms this back to LIS3DH_CLICK_THS on the very
-  // next boot, before any gesture detection runs, so the lower threshold never leaks into
-  // normal operation.
-  accelSetClickThreshold(LIS3DH_WAKE_CLICK_THS);
+  // Switch INT1 from the tap/click detector (used while awake for the double/triple-tap
+  // gesture) to a plain motion-threshold interrupt before sleeping, so any jostle above
+  // LIS3DH_WAKE_MOTION_THS_MG reliably wakes the device — not just a tap-shaped impulse.
+  // accelInit() reprograms INT1 back to the click detector on the very next boot, before
+  // any gesture detection runs, so this never leaks into normal operation.
+  accelConfigureWakeMotion(LIS3DH_WAKE_MOTION_THS_MG, LIS3DH_WAKE_MOTION_DURATION_MS);
 #endif
 
 #ifdef USE_POT_INPUT
