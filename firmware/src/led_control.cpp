@@ -8,22 +8,39 @@
 
 // Forward declarations
 static void triggerBoundaryFlash();
-static uint8_t getCompensatedPWM(uint8_t brightnessLevel);
+static uint16_t getCompensatedPWM(uint16_t brightnessLevel);
+static uint16_t clampToBatteryLimit(uint16_t requested);
 
 // LEDC channels for ESP32 PWM
 #define WHITE_LED_CHANNEL 0
 #define WARM_LED_CHANNEL  1
 #define PWM_FREQUENCY 5000  // 5 kHz
-#define PWM_RESOLUTION 8    // 8-bit (0-255)
+// PWM hardware duty resolution. Deliberately equal to MAX_BRIGHTNESS (config.h) — the whole
+// pipeline from the pot's ADC read through to this final PWM write is now the same 12-bit
+// width end to end (ADC -> brightness -> gamma LUT -> PWM duty), so nothing downstream of
+// the ADC ever throws away resolution the pot actually provided. 12 bits (0-4095) is also
+// well inside the LEDC hardware constraint at this frequency (freq * 2^bits <= ~80 MHz APB
+// clock -> up to ~13 bits at 5 kHz).
+#define PWM_RESOLUTION 12
+#define PWM_MAX_DUTY ((1u << PWM_RESOLUTION) - 1)
+// MIN_BRIGHTNESS_PWM (config.h) is expressed in MAX_BRIGHTNESS-equivalent units for
+// readability; scale it to the actual PWM duty resolution here so it stays meaningful even
+// if PWM_RESOLUTION and MAX_BRIGHTNESS ever diverge (today they're equal, so this is a
+// no-op multiply/divide by the same value).
+static const uint16_t MIN_PWM_DUTY =
+    ((uint32_t)MIN_BRIGHTNESS_PWM * PWM_MAX_DUTY) / MAX_BRIGHTNESS;
 
 // Exported state variables
 LampState currentLampState = OFF;
 uint8_t currentMode = MODE_WARM;
-uint8_t brightness = MAX_BRIGHTNESS;
+uint16_t brightness = MAX_BRIGHTNESS;
 int8_t brightnessDirection = -1;           // -1 = dimming, +1 = brightening
 
-// Gamma LUT
-static uint8_t gammaLUT[MAX_BRIGHTNESS + 1];
+// Gamma LUT — indexed by the full-resolution "brightness" level (0-MAX_BRIGHTNESS, 12-bit),
+// storing the full-resolution PWM duty (0-PWM_MAX_DUTY, see above). Computed once in
+// calculateGammaLUT() using float math for precision; the table itself just caches those
+// 4096 results so getCompensatedPWM() doesn't call pow() on every PWM update.
+static uint16_t gammaLUT[MAX_BRIGHTNESS + 1];
 
 // Smooth mode transition state
 static float currentWhitePWM = 0.0;
@@ -39,11 +56,11 @@ static bool isTransitioning = false;
 static bool boundaryFlashActive = false;
 static uint8_t boundaryFlashStep = 0;
 static unsigned long boundaryFlashTimer = 0;
-static uint8_t boundaryFlashPWM = 0;
+static uint16_t boundaryFlashPWM = 0;
 static uint8_t boundaryFlashChannel = 0;
 
 // Continuous brightness slew state (potentiometer input)
-static uint8_t brightnessSlewTarget = 0;
+static uint16_t brightnessSlewTarget = 0;
 static float brightnessSlewCurrent = 0.0f;
 static unsigned long lastSlewUpdateTime = 0;
 static bool slewInitialized = false;
@@ -54,7 +71,7 @@ static uint8_t indicatorPulseCount = 0;
 static uint16_t indicatorPeriodMs = 0;
 static float indicatorSharpness = 1.0;
 static unsigned long indicatorStartTime = 0;
-static uint8_t indicatorBrightness = 0;
+static uint16_t indicatorBrightness = 0;
 static uint8_t indicatorLEDChannel = 0;
 
 void initLED() {
@@ -76,7 +93,7 @@ void initLED() {
   DEBUG_PRINTLN(GAMMA_CORRECTION);
 }
 
-void turnOn(uint8_t mode, uint8_t brightnessLevel) {
+void turnOn(uint8_t mode, uint16_t brightnessLevel) {
   // Re-attach PWM pins when coming from OFF (they may have been detached)
   if (currentLampState == OFF) {
     ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
@@ -86,9 +103,9 @@ void turnOn(uint8_t mode, uint8_t brightnessLevel) {
 
   currentLampState = ON;
   currentMode = mode;
-  brightness = brightnessLevel;
+  brightness = clampToBatteryLimit(brightnessLevel);
 
-  uint8_t pwmValue = getCompensatedPWM(brightness);
+  uint16_t pwmValue = getCompensatedPWM(brightness);
 
   if (mode == MODE_COOL) {
     targetWhitePWM = pwmValue;
@@ -106,7 +123,7 @@ void turnOn(uint8_t mode, uint8_t brightnessLevel) {
   DEBUG_PRINT("ON: mode=");
   DEBUG_PRINT(mode == MODE_COOL ? "COOL" : "WARM");
   DEBUG_PRINT(", brightness=");
-  DEBUG_PRINTLN(brightnessLevel);
+  DEBUG_PRINTLN(brightness);
 }
 
 void turnOnAtZero(uint8_t mode) {
@@ -145,13 +162,13 @@ void turnOff() {
   DEBUG_PRINTLN("State: OFF");
 }
 
-void swapMode(uint8_t newMode, uint8_t newBrightness) {
+void swapMode(uint8_t newMode, uint16_t newBrightness) {
   if (currentLampState != ON) return;
 
   currentMode = newMode;
-  brightness = newBrightness;
+  brightness = clampToBatteryLimit(newBrightness);
 
-  uint8_t pwmValue = getCompensatedPWM(brightness);
+  uint16_t pwmValue = getCompensatedPWM(brightness);
 
   if (newMode == MODE_COOL) {
     targetWhitePWM = pwmValue;
@@ -173,10 +190,13 @@ void swapMode(uint8_t newMode, uint8_t newBrightness) {
 void incrementBrightness() {
   if (currentLampState != ON) return;
 
-  uint8_t oldBrightness = brightness;
-  uint8_t effectiveMaxBrightness = getBatteryLimitedMaxBrightness();
+  uint16_t oldBrightness = brightness;
+  uint16_t effectiveMaxBrightness = getBatteryLimitedMaxBrightness();
 
-  int newBrightness = (int)brightness + brightnessDirection;
+  // Step by BRIGHTNESS_STEP_SIZE units, not a literal 1 — brightness lives in a much wider
+  // domain now (config.h), so a single-unit step would make button-mode long-press dimming
+  // 16x slower than before for the same hold duration.
+  int newBrightness = (int)brightness + ((int)brightnessDirection * BRIGHTNESS_STEP_SIZE);
 
   if (newBrightness >= effectiveMaxBrightness) {
     brightness = effectiveMaxBrightness;
@@ -184,14 +204,14 @@ void incrementBrightness() {
       DEBUG_PRINTLN("(Reached MAX - release and hold again to dim)");
       triggerBoundaryFlash();
     }
-  } else if (newBrightness <= 1) {
-    brightness = 1;
-    if (oldBrightness != 1) {
+  } else if (newBrightness <= BRIGHTNESS_STEP_SIZE) {
+    brightness = BRIGHTNESS_STEP_SIZE;
+    if (oldBrightness != BRIGHTNESS_STEP_SIZE) {
       DEBUG_PRINTLN("(Reached MIN - release and hold again to brighten)");
       triggerBoundaryFlash();
     }
   } else {
-    brightness = (uint8_t)newBrightness;
+    brightness = (uint16_t)newBrightness;
   }
 
   // Clamp if battery state changed while dimming
@@ -208,7 +228,7 @@ void incrementBrightness() {
   // Cancel any ongoing mode transition, update PWM directly
   isTransitioning = false;
 
-  uint8_t pwmValue = getCompensatedPWM(brightness);
+  uint16_t pwmValue = getCompensatedPWM(brightness);
   if (currentMode == MODE_COOL) {
     currentWhitePWM = pwmValue;
     targetWhitePWM = pwmValue;
@@ -231,7 +251,7 @@ void reverseBrightnessDirection() {
   DEBUG_PRINTLN("Direction reversed for next hold");
 }
 
-uint8_t getActiveBrightness() {
+uint16_t getActiveBrightness() {
   return brightness;
 }
 
@@ -252,10 +272,10 @@ void calculateGammaLUT() {
   for (int i = 0; i <= MAX_BRIGHTNESS; i++) {
     float linearBrightness = (float)i / (float)MAX_BRIGHTNESS;
     float corrected = pow(linearBrightness, GAMMA_CORRECTION);
-    uint8_t pwmValue = (uint8_t)(corrected * MAX_BRIGHTNESS);
+    uint16_t pwmValue = (uint16_t)(corrected * PWM_MAX_DUTY + 0.5f);
 
-    if (i > 0 && pwmValue < MIN_BRIGHTNESS_PWM) {
-      pwmValue = MIN_BRIGHTNESS_PWM;
+    if (i > 0 && pwmValue < MIN_PWM_DUTY) {
+      pwmValue = MIN_PWM_DUTY;
     }
 
     gammaLUT[i] = pwmValue;
@@ -272,17 +292,29 @@ void calculateGammaLUT() {
   DEBUG_PRINTLN(gammaLUT[MAX_BRIGHTNESS]);
 }
 
-static uint8_t getCompensatedPWM(uint8_t brightnessLevel) {
-  uint8_t basePWM = gammaLUT[brightnessLevel];
+static uint16_t getCompensatedPWM(uint16_t brightnessLevel) {
+  uint16_t basePWM = gammaLUT[brightnessLevel];
 
   float factor = getBrightnessCompensationFactor();
-  uint8_t compensatedPWM = (uint8_t)(basePWM * factor);
+  uint16_t compensatedPWM = (uint16_t)(basePWM * factor + 0.5f);
 
-  if (brightnessLevel > 0 && compensatedPWM < MIN_BRIGHTNESS_PWM) {
-    compensatedPWM = MIN_BRIGHTNESS_PWM;
+  if (brightnessLevel > 0 && compensatedPWM < MIN_PWM_DUTY) {
+    compensatedPWM = MIN_PWM_DUTY;
   }
 
   return compensatedPWM;
+}
+
+// Clamps a requested brightness to the current battery-imposed ceiling
+// (LOW_MAX_BRIGHTNESS / CRITICAL_MAX_BRIGHTNESS, config.h, via getBatteryLimitedMaxBrightness()
+// in battery_monitor.cpp) — the single point every brightness-setting call site funnels
+// through (turnOn(), swapMode(), updateBrightnessSlew()), so the ceiling applies the same way
+// no matter which input mode or code path requested the brightness. incrementBrightness()
+// (button mode) has its own equivalent logic inline, since it also needs to know *whether*
+// the request hit the ceiling in order to trigger the boundary flash.
+static uint16_t clampToBatteryLimit(uint16_t requested) {
+  uint16_t limit = getBatteryLimitedMaxBrightness();
+  return (requested > limit) ? limit : requested;
 }
 
 void updateModeTransition() {
@@ -295,7 +327,7 @@ void updateModeTransition() {
         boundaryFlashActive = false;
         // Restore lamp brightness and sync internal state
         isTransitioning = false;
-        uint8_t pwm = getCompensatedPWM(brightness);
+        uint16_t pwm = getCompensatedPWM(brightness);
         if (currentMode == MODE_COOL) {
           currentWhitePWM = pwm; targetWhitePWM = pwm;
           currentWarmPWM  = 0;   targetWarmPWM  = 0;
@@ -325,8 +357,8 @@ void updateModeTransition() {
   currentWhitePWM = startWhitePWM + (targetWhitePWM - startWhitePWM) * progress;
   currentWarmPWM  = startWarmPWM  + (targetWarmPWM  - startWarmPWM)  * progress;
 
-  ledcWrite(WHITE_LED_CHANNEL, (uint8_t)currentWhitePWM);
-  ledcWrite(WARM_LED_CHANNEL,  (uint8_t)currentWarmPWM);
+  ledcWrite(WHITE_LED_CHANNEL, (uint16_t)currentWhitePWM);
+  ledcWrite(WARM_LED_CHANNEL,  (uint16_t)currentWarmPWM);
 
   // When transition to OFF completes, detach PWM and force GPIO LOW
   if (!isTransitioning && currentLampState == OFF) {
@@ -342,7 +374,7 @@ void updateModeTransition() {
   }
 }
 
-void setBrightnessTarget(uint8_t target) {
+void setBrightnessTarget(uint16_t target) {
   brightnessSlewTarget = target;
   if (!slewInitialized) {
     // Seed from the current brightness so the very first call doesn't visibly jump or
@@ -365,11 +397,16 @@ void updateBrightnessSlew() {
   float alpha = 1.0f - expf(-(float)dt / BRIGHTNESS_SLEW_TIME_CONSTANT_MS);
   brightnessSlewCurrent += ((float)brightnessSlewTarget - brightnessSlewCurrent) * alpha;
 
-  uint8_t newBrightness = (uint8_t)(brightnessSlewCurrent + 0.5f);
+  // brightnessSlewCurrent itself keeps easing toward wherever the pot raw-points, uncapped —
+  // only the value actually applied is clamped, right here. That's what gives the "stop on
+  // the dial" feel: holding the pot above the battery ceiling just holds the applied
+  // brightness at the ceiling; turning back down below it, the (still-continuous) eased
+  // value crosses back under the cap and tracking resumes with no jump.
+  uint16_t newBrightness = clampToBatteryLimit((uint16_t)(brightnessSlewCurrent + 0.5f));
   if (newBrightness == brightness) return;
 
   brightness = newBrightness;
-  uint8_t pwm = getCompensatedPWM(brightness);
+  uint16_t pwm = getCompensatedPWM(brightness);
   if (currentMode == MODE_COOL) {
     currentWhitePWM = pwm;
     targetWhitePWM  = pwm;
@@ -429,7 +466,7 @@ void updateBatteryIndicator() {
     indicatorPlaying = false;
 
     if (currentLampState == ON) {
-      uint8_t pwm = getCompensatedPWM(brightness);
+      uint16_t pwm = getCompensatedPWM(brightness);
       if (currentMode == MODE_COOL) {
         currentWhitePWM = pwm;
         targetWhitePWM  = pwm;
@@ -460,8 +497,8 @@ void updateBatteryIndicator() {
   float envelope = powf(sinf(t * (float)M_PI), indicatorSharpness);
   if (envelope < 0.0f) envelope = 0.0f;
 
-  uint8_t scaledBrightness = (uint8_t)(indicatorBrightness * envelope);
-  uint8_t pwm = getCompensatedPWM(scaledBrightness);
+  uint16_t scaledBrightness = (uint16_t)(indicatorBrightness * envelope);
+  uint16_t pwm = getCompensatedPWM(scaledBrightness);
   ledcWrite(indicatorLEDChannel, pwm);
 }
 

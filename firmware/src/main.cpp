@@ -15,10 +15,11 @@
 #include "accel_input.h"
 #endif
 
-// RTC-persistent variables (survive deep sleep, lost on battery disconnect)
+// RTC-persistent variables (survive deep sleep only — reset to their declared defaults on
+// any other reset, including a reflash, a reset-button/EN-pin reset, or battery disconnect)
 RTC_DATA_ATTR uint8_t savedMode = MODE_WARM;
-RTC_DATA_ATTR uint8_t warmBrightness = DEFAULT_BRIGHTNESS;
-RTC_DATA_ATTR uint8_t coolBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t bootCount = 0;
 
 // Forward declarations
@@ -28,7 +29,7 @@ void enterDeepSleep();
 static unsigned long lastInteractionTime = 0;
 
 // Helper: pointer to the brightness variable for a given mode
-static uint8_t* getModeBrightness(uint8_t mode) {
+static uint16_t* getModeBrightness(uint8_t mode) {
   return (mode == MODE_WARM) ? &warmBrightness : &coolBrightness;
 }
 
@@ -88,7 +89,7 @@ void handleModeSwap() {
 #ifdef USE_POT_INPUT
   // Brightness isn't stored per mode in pot mode — it's always just wherever the pot
   // currently points, so swap to that rather than a remembered value.
-  uint8_t target = getPotBrightnessTarget();
+  uint16_t target = getPotBrightnessTarget();
   swapMode(savedMode, target);
   setBrightnessTarget(target);
 #else
@@ -140,8 +141,8 @@ void handleLongPressEnd() {
 static void updatePotControl() {
   updatePotInput();
   bool wantsOn = isPotRequestingOn();
-  uint8_t target = getPotBrightnessTarget();
-  static uint8_t lastInteractionTarget = 0;
+  uint16_t target = getPotBrightnessTarget();
+  static uint16_t lastInteractionTarget = 0;
 
   if (wantsOn && currentLampState != ON) {
     DEBUG_PRINTLN(">>> POT: requesting ON");
@@ -274,7 +275,9 @@ static void initWatchdog() {
   if (addErr != ESP_OK && addErr != ESP_ERR_INVALID_STATE) {
     DEBUG_PRINTLN("WARNING: failed to subscribe loop task to watchdog");
   }
-  DEBUG_PRINTLN("Watchdog armed");
+  DEBUG_PRINT("Watchdog armed (timeout=");
+  DEBUG_PRINT(WATCHDOG_TIMEOUT_MS);
+  DEBUG_PRINTLN("ms)");
 }
 
 void setup() {
@@ -322,8 +325,9 @@ void setup() {
   accelInit();
   accelDumpConfig();
   // Flush any latched INT1 left over from before a reset/reflash so the first loop()
-  // iteration doesn't immediately read it as a fresh tap.
+  // iteration doesn't immediately read it as a fresh tap or motion-wake event.
   accelReadClickSrc();
+  accelReadInt1Src();
 #endif
 
 #ifndef USE_POT_INPUT
@@ -344,15 +348,17 @@ void setup() {
     gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
 
 #ifdef USE_POT_INPUT
-    // The accelerometer tap that woke us doesn't necessarily mean "turn on" — it might
-    // just be the bump of a hand reaching for the dial. Clear its latch, then take a
-    // fresh pot reading and let that decide: if the pot itself is still at OFF, stay OFF
-    // and let the deep-sleep timer below put the device straight back to sleep.
-    accelReadClickSrc();
+    // The motion that woke us doesn't necessarily mean "turn on" — it might just be the
+    // bump of a hand reaching for the dial. Clear its latch (accelInit() already switched
+    // INT1 routing back to the click detector, but the motion generator's own latch still
+    // needs an explicit read), then take a fresh pot reading and let that decide: if the
+    // pot itself is still at OFF, stay OFF and let the deep-sleep timer below put the
+    // device straight back to sleep.
+    accelReadInt1Src();
     updatePotInput();
     if (isPotRequestingOn()) {
       lastInteractionTime = millis();
-      uint8_t target = getPotBrightnessTarget();
+      uint16_t target = getPotBrightnessTarget();
       turnOnAtZero(savedMode);
       setBrightnessTarget(target);
 
@@ -490,6 +496,14 @@ void loop() {
   // Pet the watchdog — if loop() ever fails to reach here within WATCHDOG_TIMEOUT_MS
   // (e.g. an I2C hang), the device reboots instead of staying frozen.
   esp_task_wdt_reset();
+#if DEBUG
+  // Throttled confirmation, not a per-pet log — see WATCHDOG_PET_LOG_INTERVAL_MS (config.h).
+  static unsigned long lastWatchdogPetLog = 0;
+  if (millis() - lastWatchdogPetLog >= WATCHDOG_PET_LOG_INTERVAL_MS) {
+    DEBUG_PRINTLN("Watchdog pet");
+    lastWatchdogPetLog = millis();
+  }
+#endif
 
   delay(1);  // Minimal delay for smooth transitions
 }
@@ -515,6 +529,15 @@ void enterDeepSleep() {
   pinMode(WARM_LED_PIN, OUTPUT);
   digitalWrite(WARM_LED_PIN, LOW);
   gpio_hold_en((gpio_num_t)WARM_LED_PIN);
+
+#ifdef USE_ACCEL_INPUT
+  // Switch INT1 from the tap/click detector (used while awake for the double/triple-tap
+  // gesture) to a plain motion-threshold interrupt before sleeping, so any jostle above
+  // LIS3DH_WAKE_MOTION_THS_MG reliably wakes the device — not just a tap-shaped impulse.
+  // accelInit() reprograms INT1 back to the click detector on the very next boot, before
+  // any gesture detection runs, so this never leaks into normal operation.
+  accelConfigureWakeMotion(LIS3DH_WAKE_MOTION_THS_MG, LIS3DH_WAKE_MOTION_DURATION_MS);
+#endif
 
 #ifdef USE_POT_INPUT
   // Cut power to the pot's divider and latch it LOW through sleep — see the

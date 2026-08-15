@@ -141,9 +141,67 @@ same `handleModeSwap()`) but required in pot mode.
 mode — never both. Changing input hardware requires updating `enterDeepSleep()` in
 `main.cpp` — the `esp_deep_sleep_enable_gpio_wakeup` call must match the new pin and polarity.
 
+**Wake sensitivity vs. gesture tap sensitivity:** in pot mode the LIS3DH detects two
+different things depending on power state, and they want different sensitivity and even a
+different kind of detector. While awake, INT1 is routed to the click/tap engine that
+detects the double/triple-tap mode-swap gesture; `LIS3DH_CLICK_THS` (config.h) is
+deliberately conservative there, tuned to reject incidental bumps — the lamp body gets
+knocked constantly by ordinary handling, especially turning the pot knob — and the click
+engine only fires on a short, sharp, tap-shaped impulse in the first place. That's too
+narrow for a deep-sleep wake source, where the goal is the opposite: any jostle — a slow
+push, a gentle rock, not just a tap — should wake the device, since a false wake costs a
+little battery (the device just checks the pot and, finding it still at OFF, goes straight
+back to sleep — see "Wake-then-check" above) while a missed wake means physically
+power-cycling the lamp. `enterDeepSleep()` switches INT1 from the click engine to the
+LIS3DH's separate AOI/IA1 motion-threshold interrupt generator right before calling
+`esp_deep_sleep_start()`, via `accelConfigureWakeMotion(LIS3DH_WAKE_MOTION_THS_MG,
+LIS3DH_WAKE_MOTION_DURATION_MS)` (`accel_input.cpp`) — a few targeted register writes, not a
+full reinit. On the next boot, `accelInit()` unconditionally reprograms every LIS3DH
+register including INT1 routing, resetting it back to the click engine before `loop()` (and
+therefore any gesture detection) ever runs — so the motion-based wake source never leaks
+into normal double-tap operation, and no explicit "restore" step is needed on the wake path
+itself. The wake-clear read on that path (`accelReadInt1Src()`) reads the motion
+generator's own source register, not `CLICK_SRC` — it's a different latch.
+
 ## Brightness Control
 
-**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS`, gamma = 2.2. `MIN_BRIGHTNESS_PWM` (= 1) prevents fully off while ON. LUT entry [0] = 0 for OFF transitions.
+**End-to-end resolution:** the full signal path from the pot's ADC read to the final PWM write is 12-bit throughout, with no intermediate rounding down to a coarser domain anywhere in between:
+
+```
+ADC read          "brightness"           gamma LUT              PWM duty
+0-4095 (12-bit) -> 0-MAX_BRIGHTNESS -> (4096-entry table, -> 0-PWM_MAX_DUTY
+(POT_ADC_MAX)      (config.h,           computed in float)     (12-bit,
+                    = POT_ADC_MAX,                              PWM_RESOLUTION
+                    = PWM_MAX_DUTY)                              in led_control.cpp)
+```
+
+`MAX_BRIGHTNESS`, `POT_ADC_MAX`, and `PWM_RESOLUTION`'s `PWM_MAX_DUTY` are all deliberately
+set to the same value (4095) — `mapPotToBrightness()` (`pot_input.cpp`) turns into a pure
+identity mapping (once the raw ADC reading is clamped to range), so the pot's full ADC
+resolution passes through untouched. This used to be a real bottleneck: `brightness` was a
+`uint8_t` (0-255) even though the ADC read 12-bit and gamma correction was computed in
+float — every pot reading got crushed from 4096 possible positions down to only 256
+distinguishable brightness levels *before* gamma or the PWM stage ever saw it, no matter how
+much resolution either of those had downstream. Widening `brightness` itself (and everything
+that carries it — the gamma LUT's index, the brightness slew target, the RTC-persisted
+per-mode brightness in button mode, etc.) to match removes that bottleneck; only the actual
+*mark on the dial* (which gesture, which gamma curve) matters now, not an accidental
+resolution loss partway through.
+
+**Gamma correction:** full LUT from 0–`MAX_BRIGHTNESS`, 4096 entries, gamma = 2.2 —
+`calculateGammaLUT()` computes each entry with `pow()` in float for precision, then caches
+the rounded result so `getCompensatedPWM()` doesn't call `pow()` on every PWM update. LUT
+entry [0] = 0 for OFF transitions. `MIN_BRIGHTNESS_PWM` (config.h, in `MAX_BRIGHTNESS`-
+equivalent units) is scaled internally to `MIN_PWM_DUTY` so the "never fully off while ON"
+floor stays a consistent ~0.4% duty cycle even if `PWM_RESOLUTION` and `MAX_BRIGHTNESS` are
+ever changed independently (today they're numerically equal, so the scaling is a no-op).
+
+**Button-mode step size:** `incrementBrightness()`'s discrete step (button-mode long-press
+dimming) is `BRIGHTNESS_STEP_SIZE` units per `BRIGHTNESS_STEP_MS` tick, not a literal 1 —
+scaled up by the same factor `MAX_BRIGHTNESS` grew by (255 -> 4095) so a full-range
+dim/brighten sweep still takes the same real-world time as before the resolution change.
+Only the pot's *live* tracking needed the full domain; button mode's discrete stepping just
+needed to not get 16x slower by accident.
 
 **Continuous dimming (button mode):** hold → increment/decrement every `BRIGHTNESS_STEP_MS` (30 ms). Direction reverses on release. Double-flash (non-blocking) on boundary hit.
 
@@ -164,11 +222,33 @@ mode — never both. Changing input hardware requires updating `enterDeepSleep()
 | State | Voltage | Behaviour |
 |-------|---------|-----------|
 | NORMAL | > 3.5 V | Full operation |
-| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, then recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
-| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at 50%, recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
+| LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, brightness capped at `LOW_MAX_BRIGHTNESS` (~50%), recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
+| CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at `CRITICAL_MAX_BRIGHTNESS` (~25%), recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
 | CUTOFF | < 3.0 V | Refuse to turn on, enter deep sleep |
 
 Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LOW needs > 3.3 V; CUTOFF→CRITICAL needs > 3.2 V (typically charging).
+
+**Brightness ceiling (LOW/CRITICAL), both modes:** `getBatteryLimitedMaxBrightness()`
+(`battery_monitor.cpp`) returns `LOW_MAX_BRIGHTNESS` / `CRITICAL_MAX_BRIGHTNESS` /
+`MAX_BRIGHTNESS` for the current state; `led_control.cpp`'s `clampToBatteryLimit()` is the
+single point every brightness-setting call site (`turnOn()`, `swapMode()`,
+`updateBrightnessSlew()`) funnels a requested brightness through before it's stored in the
+`brightness` variable that everything downstream (PWM, the battery indicator's own
+brightness, boundary flash) reads from — so the ceiling applies uniformly no matter which
+input mode or code path requested it. This used to only be enforced inside button mode's
+`incrementBrightness()` (and only for CRITICAL, not LOW) — pot mode's live tracking never
+went through it at all, so turning the pot to full still requested full brightness
+regardless of battery state.
+
+In pot mode this reads as a mechanical stop: `updateBrightnessSlew()` clamps the *value it
+applies* every tick, but lets `brightnessSlewCurrent` keep easing toward wherever the pot
+raw-points, uncapped, internally. Turning the dial past the position that would request more
+than the ceiling just has no further visible effect; turning back down, the still-continuous
+internal eased value crosses back under the cap and live tracking resumes with no jump or
+extra lag. In button mode, `incrementBrightness()` has its own equivalent inline clamp
+(rather than calling `clampToBatteryLimit()`) since it also needs to know *whether* a held
+long-press just hit the ceiling, to trigger the same boundary-flash feedback as hitting the
+true top of the range.
 
 **Battery indicator pulse:** non-blocking sine-envelope animation. Sharpness encodes urgency (1.0 = smooth sine, 5.0 = sharp spike). In button mode, the button's own gesture recognition is blocked while playing; pot tracking and the accelerometer gesture are never blocked in either mode.
 
@@ -180,7 +260,7 @@ The "worsened" memory resets once the battery recovers back to NORMAL, so a futu
 
 ## Power Management
 
-**Deep sleep:** entered after `DEEP_SLEEP_TIMEOUT_MS` (60 s) in OFF state. GPIO10/GPIO5 must use `gpio_hold_en()` before sleep to prevent MOSFET leakage causing LED glow; `gpio_hold_dis()` on wake.
+**Deep sleep:** entered after `DEEP_SLEEP_TIMEOUT_MS` (30 s) in OFF state. GPIO10/GPIO5 must use `gpio_hold_en()` before sleep to prevent MOSFET leakage causing LED glow; `gpio_hold_dis()` on wake.
 
 **Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, `turnOff()` is called; deep sleep timer then starts. `lastInteractionTime` is updated in every gesture callback and on wake from deep sleep.
 
@@ -247,13 +327,15 @@ support whichever Arduino core version is in use.
 
 ## RTC Memory Persistence
 
-Survives deep sleep; lost on battery disconnect. Defaults (WARM, 50%) apply after disconnect.
+Survives deep sleep only. Any other reset — reflashing, a reset-button/EN-pin reset, or
+battery disconnect — reinitializes RTC memory from the declared defaults (WARM, full
+brightness), same as ordinary globals on a cold boot.
 
 ```cpp
-RTC_DATA_ATTR uint8_t savedMode      = MODE_WARM;
-RTC_DATA_ATTR uint8_t warmBrightness = 128;
-RTC_DATA_ATTR uint8_t coolBrightness = 128;
-RTC_DATA_ATTR uint16_t bootCount     = 0;  // debug
+RTC_DATA_ATTR uint8_t  savedMode      = MODE_WARM;
+RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;  // = MAX_BRIGHTNESS
+RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
+RTC_DATA_ATTR uint16_t bootCount      = 0;  // debug
 ```
 
 `warmBrightness`/`coolBrightness` are only meaningful in button mode, where brightness is
@@ -286,3 +368,18 @@ Tests include `.cpp` source files directly (not via linking). The mock Arduino e
 | Touch gestures (button mode) | `test/test_touch/test_touch_input.cpp` | 11 |
 | Pot mapping, hysteresis & filtering (pot mode) | `test/test_pot/test_pot_input.cpp` | 16 |
 | Battery state machine | `test/test_battery/test_battery_state_machine.cpp` | 15 |
+| LED/brightness — battery ceiling clamp | `test/test_led_control/test_led_control.cpp` | 9 |
+
+**`test_led_control`** is the one suite that includes `led_control.cpp` itself (alongside
+`battery_monitor.cpp`, since `getCompensatedPWM()`/`clampToBatteryLimit()` call into it) —
+needed to reach `led_control.cpp`'s `static` helpers and to observe the actual PWM duty via
+mocked `ledcWrite()`, added to `test/Arduino.h` alongside the other LEDC mocks
+(`ledcSetup`/`ledcAttachPin`/`ledcDetachPin`) for this suite. Unlike the other suites, it
+makes `millis()` a controllable fake clock (a settable variable, not hardcoded to `0`) so it
+can drive the time-based brightness slew deterministically — advancing it by
+`~10 * BRIGHTNESS_SLEW_TIME_CONSTANT_MS` in one jump is enough for the exponential ease to
+fully settle without simulating every intermediate tick. Covers: `clampToBatteryLimit()`
+directly (NORMAL/LOW/CRITICAL, and that it's a ceiling, not a rescale, for requests already
+under the limit), plus an end-to-end sweep — pot held at max, battery state degrading
+NORMAL → LOW → CRITICAL → NORMAL underneath it with the target never changing — asserting
+both the applied `brightness` and the `ledcWrite()`-observed duty at each stage.

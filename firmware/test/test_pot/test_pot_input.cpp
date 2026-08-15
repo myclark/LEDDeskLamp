@@ -31,8 +31,8 @@ void test_map_full_scale_adc_to_max_brightness(void) {
 }
 
 void test_map_midscale_adc_to_roughly_half_brightness(void) {
-  uint8_t mapped = mapPotToBrightness(POT_ADC_MAX / 2);
-  TEST_ASSERT_UINT8_WITHIN(2, MAX_BRIGHTNESS / 2, mapped);
+  uint16_t mapped = mapPotToBrightness(POT_ADC_MAX / 2);
+  TEST_ASSERT_UINT16_WITHIN(2, MAX_BRIGHTNESS / 2, mapped);
 }
 
 void test_map_clamps_out_of_range_low(void) {
@@ -50,7 +50,7 @@ void test_map_within_top_deadzone_snaps_to_max(void) {
 
 void test_map_outside_top_deadzone_does_not_snap(void) {
   // Comfortably below the deadzone (80% of full scale) should not snap
-  uint8_t mapped = mapPotToBrightness((POT_ADC_MAX * 80) / 100);
+  uint16_t mapped = mapPotToBrightness((POT_ADC_MAX * 80) / 100);
   TEST_ASSERT_LESS_THAN(MAX_BRIGHTNESS, mapped);
 }
 
@@ -73,12 +73,12 @@ void test_turns_off_at_off_threshold(void) {
 }
 
 void test_dead_zone_holds_last_state_while_on(void) {
-  uint8_t midDeadZone = (POT_OFF_THRESHOLD + POT_ON_HYSTERESIS) / 2;
+  uint16_t midDeadZone = (POT_OFF_THRESHOLD + POT_ON_HYSTERESIS) / 2;
   TEST_ASSERT_TRUE(updatePotStateMachine(true, midDeadZone));
 }
 
 void test_dead_zone_holds_last_state_while_off(void) {
-  uint8_t midDeadZone = (POT_OFF_THRESHOLD + POT_ON_HYSTERESIS) / 2;
+  uint16_t midDeadZone = (POT_OFF_THRESHOLD + POT_ON_HYSTERESIS) / 2;
   TEST_ASSERT_FALSE(updatePotStateMachine(false, midDeadZone));
 }
 

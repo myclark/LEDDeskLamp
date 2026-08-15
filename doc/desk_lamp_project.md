@@ -403,9 +403,9 @@ staying frozen indefinitely. See Software Architecture below.
 
 **OFF State:**
 - Both MOSFETs off (GPIO held LOW to prevent leakage)
-- Deep sleep after 60 seconds of inactivity
+- Deep sleep after 30 seconds of inactivity
 - Wake source is mode-dependent: button (`BUTTON_PIN` HIGH) in button mode, accelerometer
-  tap (`LIS3DH_INT_PIN` HIGH) in pot mode — the ESP32-C3 can't wake from an ADC threshold,
+  motion (`LIS3DH_INT_PIN` HIGH) in pot mode — the ESP32-C3 can't wake from an ADC threshold,
   so the pot itself can never be the wake source
 - In pot mode, a wake doesn't automatically turn the lamp on: it might just be a hand
   bumping the lamp while reaching for the dial. On wake, firmware takes a fresh pot
@@ -587,7 +587,8 @@ New/changed with the pot + accelerometer + watchdog redesign — not yet verifie
       turning the pot up while reaching for it does turn it on
 - [ ] Verify a single accelerometer tap does nothing and a double/triple tap swaps mode, in
       both input modes, including while adjusting the pot (should not trigger a swap)
-- [ ] Verify deep sleep wake via accelerometer tap (pot mode) and via button (button mode)
+- [ ] Verify deep sleep wake via accelerometer motion — including a slow push/rock, not just
+      a tap (pot mode) — and via button (button mode)
 - [ ] Measure standby current in OFF state in both input modes (target ~21-27µA each — see
       Power Budget Estimates below; this is currently only a datasheet-math estimate)
 - [ ] Induce an I2C stall and confirm the task watchdog reboots the device instead of it

@@ -82,14 +82,38 @@
 #define ADC_CALIBRATION_FACTOR 0.904  // Tuned to oscilloscope reading (5.246V actual → 5.63V calculated)
 #define BMS_VOLTAGE_DROP 0.090        // TP4056 MOSFET voltage drop (~90mV)
 
-// Maximum brightness for testing (0-255)
-// Set to 128 (50%) for 3.3V testing, increase to 255 for full battery voltage
-#define MAX_BRIGHTNESS 255
-#define MIN_BRIGHTNESS_PWM 1         // Minimum PWM output value (prevents LED completely off)
+// Ceiling of the "brightness" domain that pot/button input, gamma correction, and every
+// brightness-relative threshold below operate in. Deliberately set to 4095 (12-bit) to
+// exactly match POT_ADC_MAX below (the pot's raw ADC resolution) and PWM_RESOLUTION in
+// led_control.cpp (the PWM hardware's duty resolution) — the full chain is now
+// ADC(12-bit) -> brightness(12-bit) -> gamma LUT(4096 entries, computed in float) ->
+// PWM(12-bit), with no intermediate rounding down to a coarser domain anywhere in between.
+// mapPotToBrightness() (pot_input.cpp) relies on this equality to pass the ADC's full
+// resolution through with zero precision loss. If you ever change one of these three
+// (this, POT_ADC_MAX, or led_control.cpp's PWM_RESOLUTION) independently, the others still
+// work correctly (mapPotToBrightness() and the gamma LUT both scale generically), you just
+// stop getting the "no precision lost anywhere" property.
+#define MAX_BRIGHTNESS 4095
+// Minimum PWM output floor (prevents the LED going fully dark while ON), expressed in
+// MAX_BRIGHTNESS-equivalent units for readability — led_control.cpp scales this to the
+// actual PWM duty resolution (PWM_RESOLUTION, currently 12-bit, currently identical to
+// MAX_BRIGHTNESS so this scaling is a no-op today), so it stays a consistent ~0.4%
+// duty-cycle floor regardless of that resolution.
+#define MIN_BRIGHTNESS_PWM 16
 
 // Brightness configuration
-#define GAMMA_CORRECTION 2.2        // Gamma curve for perceptual brightness (2.0-2.5 typical)
+// Gamma curve for perceptual brightness (2.0-2.5 typical). Retune this value by ear on real
+// hardware if the low/mid/high thirds of the pot's travel feel uneven — that's a property of
+// the curve's shape, independent of the domain resolution above.
+#define GAMMA_CORRECTION 2.2
 #define BRIGHTNESS_STEP_MS 30       // Time between brightness increments when holding (continuous)
+// How many brightness units incrementBrightness() (button mode long-press) moves per
+// BRIGHTNESS_STEP_MS tick. Scaled up from the old 1-unit-per-tick step (back when
+// MAX_BRIGHTNESS was 255) by the same factor MAX_BRIGHTNESS grew by, so a full-range
+// dim/brighten sweep still takes the same real-world time as before — only the pot's live
+// tracking actually needed the wider domain; button mode's discrete stepping just needs to
+// not get 16x slower by accident.
+#define BRIGHTNESS_STEP_SIZE (MAX_BRIGHTNESS / 255)
 #define MODE_TRANSITION_MS 400      // Smooth fade duration when changing modes
 // Exponential smoothing time constant for live brightness tracking (potentiometer mode).
 // Larger = slower, dreamier follow; smaller = snappier/more direct. At this time constant,
@@ -99,7 +123,7 @@
 // Timing thresholds (milliseconds)
 #define DEBOUNCE_MS 50
 #define LONG_PRESS_MS 800
-#define DEEP_SLEEP_TIMEOUT_MS 60000     // Enter deep sleep after 1 minute in OFF state
+#define DEEP_SLEEP_TIMEOUT_MS 30000     // Enter deep sleep after 30 seconds in OFF state
 #define AUTO_OFF_ENABLED 1              // Set to 0 to disable auto-off
 #define AUTO_OFF_TIMEOUT_MS 14400000    // Auto-off after 4 hours with no interaction
 #define USB_CDC_INIT_DELAY_MS 100       // Delay for USB CDC enumeration on boot
@@ -107,6 +131,11 @@
 // Watchdog: if the main loop doesn't check in within this window (I2C bus lockup,
 // a future bug, etc.), the task watchdog reboots the device instead of staying frozen.
 #define WATCHDOG_TIMEOUT_MS 8000
+// How often loop() logs a "still petting" confirmation in DEBUG builds. loop() pets the
+// watchdog on essentially every iteration (there's only a 1 ms delay at the bottom), so
+// logging every single pet would flood serial and could itself delay loop() enough to risk
+// tripping the very watchdog it's confirming — so this is throttled, not a per-pet log.
+#define WATCHDOG_PET_LOG_INTERVAL_MS 5000
 // Bounds every Wire (I2C) transaction so a bus glitch on the accelerometer link can't
 // block loop() indefinitely — it fails fast instead and the watchdog above is just the backstop.
 #define I2C_TIMEOUT_MS 50
@@ -125,23 +154,25 @@
 #define ADC_SAMPLE_COUNT 8           // Number of ADC samples to average for battery voltage
 
 // ── Potentiometer tuning (only relevant when USE_POT_INPUT is defined) ─────────
-#define POT_ADC_MAX 4095             // Full-scale ADC reading at 12-bit resolution
+// Full-scale ADC reading at 12-bit resolution. Deliberately equal to MAX_BRIGHTNESS above —
+// see the comment there for why.
+#define POT_ADC_MAX 4095
 #define POT_SAMPLE_COUNT 4           // ADC samples averaged per read (light denoise, no delay needed)
 // On/off hysteresis, in mapped brightness units (0..MAX_BRIGHTNESS), not raw ADC counts.
 // Two different thresholds prevent flicker right at the boundary: once ON, the pot must
 // drop to/below POT_OFF_THRESHOLD to turn off; once OFF, it must rise to/above the higher
 // POT_ON_HYSTERESIS to turn back on. Between the two, the lamp just holds its last state.
-#define POT_OFF_THRESHOLD 8          // ~3% of full scale
-#define POT_ON_HYSTERESIS 13         // ~5% of full scale
+#define POT_OFF_THRESHOLD 128        // ~3% of full scale
+#define POT_ON_HYSTERESIS 208        // ~5% of full scale
 // Top-end dead zone, mirroring the bottom: pots rarely hit their mechanical/electrical
 // limit exactly, so without this the user could never quite reach 100% by feel. Once the
 // mapped brightness is within this many units of MAX_BRIGHTNESS, it snaps to exactly
 // MAX_BRIGHTNESS. This is a plain value clamp (unlike the bottom, which needs a full
 // on/off hysteresis state machine since crossing it is a functional state change).
-#define POT_MAX_DEADZONE 8           // ~3% of full scale, same margin as POT_OFF_THRESHOLD
+#define POT_MAX_DEADZONE 128         // ~3% of full scale, same margin as POT_OFF_THRESHOLD
 // Minimum pot movement (brightness units) that counts as user interaction for the
 // auto-off timer — filters out ADC jitter that would otherwise reset it forever.
-#define POT_MOVEMENT_DEADBAND 2
+#define POT_MOVEMENT_DEADBAND 32
 // General noise filtering across the whole travel (not just the two ends): exponential
 // smoothing applied to the pot's reading, tick to tick, before it's used for anything —
 // the on/off decision, the brightness target, all of it. Distinct from
@@ -166,8 +197,16 @@
 // Battery state machine hysteresis
 #define CRITICAL_CONSECUTIVE_THRESHOLD 3  // Consecutive low readings before entering CRITICAL
 
-// Battery brightness limiting
-#define CRITICAL_MAX_BRIGHTNESS 64        // Max brightness in CRITICAL state (~25% of 255)
+// Battery brightness limiting — a hard ceiling on the *applied* brightness (not just a
+// hint), enforced once at the single point every brightness-setting path funnels through
+// (clampToBatteryLimit() in led_control.cpp), so it applies the same way no matter which
+// input mode or code path requested the brightness. In pot mode this feels like a
+// mechanical stop: turning the dial past the position that would request more than the
+// ceiling simply has no further effect — the existing LOW/CRITICAL indicator pulse is the
+// user's cue why. In button mode, incrementBrightness() additionally flashes the first time
+// a held long-press runs into the ceiling, same as hitting the true top of the range.
+#define LOW_MAX_BRIGHTNESS 2048            // Max brightness in LOW state (~50% of full scale)
+#define CRITICAL_MAX_BRIGHTNESS 1024       // Max brightness in CRITICAL state (~25% of full scale)
 
 // Voltage divider ratio: (100kΩ + 33kΩ) / 33kΩ = 4.030
 #define VOLTAGE_DIVIDER_RATIO 4.030
@@ -180,7 +219,7 @@
 #define PROGRAMMING_MODE_MAX_PWM 128  // Cap at 50% when on USB power
 
 // Battery indicator pulse configuration
-#define PULSE_MIN_BRIGHTNESS 64      // Minimum brightness for pulse indicator (~25% of 255)
+#define PULSE_MIN_BRIGHTNESS 1024    // Minimum brightness for pulse indicator (~25% of full scale)
 
 // Pulse parameters per battery state: count, period (ms), sharpness (1.0=sine, higher=sharper)
 #define PULSE_NORMAL_COUNT 3
@@ -204,7 +243,7 @@
 #define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL * 60 * 1000)   // 5 min
 
 // Default brightness on first power-up (RTC memory cleared)
-#define DEFAULT_BRIGHTNESS 255
+#define DEFAULT_BRIGHTNESS MAX_BRIGHTNESS
 
 // ── Input mode selection ───────────────────────────────────────────────────
 // Primary control: choose exactly one physical input for on/off + brightness.
@@ -241,7 +280,27 @@
                                     // from single-tap (Sclick) events instead.
 #define LIS3DH_CLICK_THS     0x10   // ~256 mg threshold — hardware-verified during bring-up
                                     // (commit bbe2f1b); 0x20 is too insensitive to register
-                                    // real taps on this enclosure.
+                                    // real taps on this enclosure. Used whenever the device is
+                                    // awake, for the double/triple-tap mode-swap gesture — this
+                                    // one is deliberately conservative to reject incidental
+                                    // bumps (see ACCEL_MODE_SWAP_TAP_COUNT below).
+// Wake source used ONLY while asleep: a plain "any axis exceeds this level" motion
+// interrupt (main.cpp's enterDeepSleep() programs this right before
+// esp_deep_sleep_start(), via accelConfigureWakeMotion()) — not the tap/click detector
+// used while awake, so it responds to a slow push or gentle rocking, not just a
+// tap-shaped impulse. Expressed directly in mg/ms rather than raw register units;
+// accelConfigureWakeMotion() converts them (see the mg/ms-per-LSB comments above
+// mgToThs()/msToDuration() in accel_input.cpp — both assume the fixed ±2g full-scale
+// range and 100 Hz ODR set in accelInit()). Waking doesn't turn the lamp on by itself —
+// setup() checks the pot position first (see doc/firmware_architecture.md,
+// "Wake-then-check") — so a spurious wake here just costs a little battery, not a false
+// power-on. accelInit() resets INT1 back to the tap/click detector on every boot, before
+// any gesture detection runs, so this never leaks into normal double-tap operation.
+// Needs the same kind of on-hardware tuning as LIS3DH_CLICK_THS above — lower if slow
+// jostling still doesn't wake it, raise if it wakes from ambient vibration alone.
+#define LIS3DH_WAKE_MOTION_THS_MG      128  // ~same magnitude as the tap-wake threshold it replaces
+#define LIS3DH_WAKE_MOTION_DURATION_MS 0    // 0 = fires on the first sample over threshold,
+                                             // so a sharp tap still wakes it instantly too
 #define LIS3DH_CTRL_REG1     0x57   // 100 Hz low-power, X+Y+Z enabled (~6 µA)
 #define LIS3DH_TIME_LIMIT    0x0F   // 150 ms max tap impulse window — physical enclosures ring
                                     // longer than 60ms; a shorter window rejects real taps.

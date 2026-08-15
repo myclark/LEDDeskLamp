@@ -30,7 +30,7 @@ void displayBatteryStatus();
 float getLastBatteryVoltage();
 
 // Get effective max brightness based on battery state
-uint8_t getBatteryLimitedMaxBrightness();
+uint16_t getBatteryLimitedMaxBrightness();
 
 // Get brightness compensation factor for current battery voltage
 // Returns a factor (0.0 to 1.0) to scale PWM values

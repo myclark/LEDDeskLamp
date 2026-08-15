@@ -157,13 +157,13 @@ void test_battery_limited_brightness(void) {
   currentBatteryState = BATTERY_NORMAL;
   TEST_ASSERT_EQUAL(MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
 
-  // CRITICAL state - should return limited brightness (50% of MAX_BRIGHTNESS)
+  // LOW state - should return limited brightness (~50% of MAX_BRIGHTNESS)
+  currentBatteryState = BATTERY_LOW;
+  TEST_ASSERT_EQUAL(LOW_MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
+
+  // CRITICAL state - should return limited brightness (~25% of MAX_BRIGHTNESS)
   currentBatteryState = BATTERY_CRITICAL;
   TEST_ASSERT_EQUAL(CRITICAL_MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
-
-  // LOW state - should return MAX_BRIGHTNESS
-  currentBatteryState = BATTERY_LOW;
-  TEST_ASSERT_EQUAL(MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
 
   // CUTOFF state - doesn't matter, lamp won't turn on, but should return MAX
   currentBatteryState = BATTERY_CUTOFF;

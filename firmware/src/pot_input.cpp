@@ -2,7 +2,7 @@
 #include <math.h>
 
 static bool potOnState = false;
-static uint8_t potBrightnessTarget = 0;
+static uint16_t potBrightnessTarget = 0;
 
 // Tick-to-tick noise filter state (see smoothPotReading())
 static float filteredRaw = 0.0f;
@@ -31,10 +31,16 @@ void potPowerOff() { digitalWrite(POT_POWER_PIN, LOW); }
 // if the pot's mechanical/electrical range doesn't quite hit full scale. The bottom end
 // doesn't need an equivalent snap here — POT_ON_HYSTERESIS already puts a floor under the
 // lowest brightness reachable while ON, via updatePotStateMachine() below.
-uint8_t mapPotToBrightness(int rawAdc) {
+//
+// MAX_BRIGHTNESS is deliberately equal to POT_ADC_MAX (config.h), so this multiply/divide
+// is mathematically an identity (mapped == rawAdc, once clamped) — the pot's full 12-bit
+// ADC resolution passes straight through with no precision lost. The formula is kept
+// general rather than special-cased so the function stays correct if the two constants
+// ever diverge (e.g. a different ADC bit depth).
+uint16_t mapPotToBrightness(int rawAdc) {
   if (rawAdc < 0) rawAdc = 0;
   if (rawAdc > POT_ADC_MAX) rawAdc = POT_ADC_MAX;
-  uint8_t mapped = (uint8_t)(((long)rawAdc * MAX_BRIGHTNESS) / POT_ADC_MAX);
+  uint16_t mapped = (uint16_t)(((long)rawAdc * MAX_BRIGHTNESS) / POT_ADC_MAX);
   if (mapped >= MAX_BRIGHTNESS - POT_MAX_DEADZONE) {
     mapped = MAX_BRIGHTNESS;
   }
@@ -45,7 +51,7 @@ uint8_t mapPotToBrightness(int rawAdc) {
 // Two thresholds prevent flicker at the boundary: once ON, must drop to/below
 // POT_OFF_THRESHOLD to turn off; once OFF, must rise to/above the higher
 // POT_ON_HYSTERESIS to turn back on. In between, holds the last state.
-bool updatePotStateMachine(bool currentlyOn, uint8_t mappedBrightness) {
+bool updatePotStateMachine(bool currentlyOn, uint16_t mappedBrightness) {
   if (currentlyOn) {
     return mappedBrightness > POT_OFF_THRESHOLD;
   }
@@ -86,4 +92,4 @@ void updatePotInput() {
 }
 
 bool isPotRequestingOn() { return potOnState; }
-uint8_t getPotBrightnessTarget() { return potBrightnessTarget; }
+uint16_t getPotBrightnessTarget() { return potBrightnessTarget; }
