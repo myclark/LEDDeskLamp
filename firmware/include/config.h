@@ -3,7 +3,7 @@
 
 // Debug output control
 // Set to 1 to enable debug prints, 0 to disable
-#define DEBUG 1
+#define DEBUG 0
 
 #if DEBUG
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -131,13 +131,13 @@
 // Watchdog: if the main loop doesn't check in within this window (I2C bus lockup,
 // a future bug, etc.), the task watchdog reboots the device instead of staying frozen.
 #define WATCHDOG_TIMEOUT_MS 8000
-// Bounds every Wire (I2C) transaction so a bus glitch on the accelerometer link can't
-// block loop() indefinitely — it fails fast instead and the watchdog above is just the backstop.
 // How often loop() logs a "still petting" confirmation in DEBUG builds. loop() pets the
 // watchdog on essentially every iteration (there's only a 1 ms delay at the bottom), so
 // logging every single pet would flood serial and could itself delay loop() enough to risk
 // tripping the very watchdog it's confirming — so this is throttled, not a per-pet log.
 #define WATCHDOG_PET_LOG_INTERVAL_MS 5000
+// Bounds every Wire (I2C) transaction so a bus glitch on the accelerometer link can't
+// block loop() indefinitely — it fails fast instead and the watchdog above is just the backstop.
 #define I2C_TIMEOUT_MS 50
 
 // Gesture detection

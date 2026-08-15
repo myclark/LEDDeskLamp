@@ -88,7 +88,16 @@ void accelConfigureWakeMotion(uint16_t ths_mg, uint16_t duration_ms) {
     uint8_t duration = msToDuration(duration_ms);
     writeReg(0x32, ths);       // INT1_THS
     writeReg(0x33, duration);  // INT1_DURATION
-    writeReg(0x30, 0x2A);      // INT1_CFG: OR of X/Y/Z high-threshold events (any axis)
+    writeReg(0x30, 0x2A);      // INT1_CFG: OR of X/Y/Z high-threshold events (any axis) — this
+                                // arms the AOI generator immediately, and it keeps latching
+                                // INT1_SRC in the background for as long as it stays armed, even
+                                // while CTRL_REG3 has it unrouted from the pin (i.e. all through
+                                // the awake session, since accelInit() never touches INT1_CFG).
+                                // Read INT1_SRC now to clear that accumulated latch — otherwise
+                                // the very next line, which routes IA1 onto the physical pin,
+                                // would surface a stale motion event from earlier in the awake
+                                // session and wake the device again immediately.
+    accelReadInt1Src();
     writeReg(0x22, 0x40);      // CTRL_REG3: route the motion interrupt (I1_IA1) to INT1,
                                 // replacing the click routing accelInit() set at boot
     DEBUG_PRINT("ACCEL: wake-motion config applied (");

@@ -69,28 +69,30 @@ Brightness is never persisted — it's always just wherever the pot currently po
 
 Tapping the lamp body `ACCEL_MODE_SWAP_TAP_COUNT` times (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only; any other count, including a single tap, is ignored.
 
-Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (60 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer.
+Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (30 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer.
 
 ## Key Config (`include/config.h`)
 
 ```cpp
 #define USE_POT_INPUT                // Comment out to use the physical button instead
-#define MAX_BRIGHTNESS 255           // Reduce if testing on USB (not full battery)
+#define MAX_BRIGHTNESS 4095          // 12-bit domain; ADC/gamma/PWM all carry this resolution end to end
 #define DEBUG 0                      // Set to 1 to enable Serial output
 #define AUTO_OFF_ENABLED 1
 #define AUTO_OFF_TIMEOUT_MS 14400000 // 4 hours
-#define DEEP_SLEEP_TIMEOUT_MS 60000  // 60 seconds in OFF before sleep
+#define DEEP_SLEEP_TIMEOUT_MS 30000  // 30 seconds in OFF before sleep
 #define ADC_CALIBRATION_FACTOR 0.904 // Tune to match oscilloscope reading
 #define BMS_VOLTAGE_DROP 0.090       // TP4056 MOSFET drop (~90 mV)
 #define WATCHDOG_TIMEOUT_MS 8000     // Reboots if loop() stalls this long (see Timeout Audit & Watchdog in doc/firmware_architecture.md)
-#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 150  // Pot mode: eased brightness follow speed (output)
+#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 1000  // Pot mode: eased brightness follow speed (output)
 #define POT_FILTER_TIME_CONSTANT_MS 30  // Pot mode: raw ADC noise filter, all positions (input)
-#define POT_OFF_THRESHOLD 8          // Pot mode: brightness units at/below which lamp turns off
-#define POT_ON_HYSTERESIS 13         // Pot mode: brightness units at/above which lamp turns on
-#define POT_MAX_DEADZONE 8           // Pot mode: snaps to MAX_BRIGHTNESS within this margin of full scale
+#define POT_OFF_THRESHOLD 128        // Pot mode: brightness units at/below which lamp turns off
+#define POT_ON_HYSTERESIS 208        // Pot mode: brightness units at/above which lamp turns on
+#define POT_MAX_DEADZONE 128         // Pot mode: snaps to MAX_BRIGHTNESS within this margin of full scale
 #define BATTERY_INDICATOR_REPEAT_LOW_MS      (20UL*60*1000)  // Recurring reminder while ON + LOW
 #define BATTERY_INDICATOR_REPEAT_CRITICAL_MS (5UL*60*1000)   // Recurring reminder while ON + CRITICAL
 #define ACCEL_MODE_SWAP_TAP_COUNT 2  // Exact tap count that swaps mode (2 or 3); the other is free for a future gesture
+#define LOW_MAX_BRIGHTNESS 2048      // Battery brightness ceiling in LOW state (~50% of full scale)
+#define CRITICAL_MAX_BRIGHTNESS 1024 // Battery brightness ceiling in CRITICAL state (~25% of full scale)
 ```
 
 Battery thresholds (`BATTERY_LOW_THRESHOLD`, `BATTERY_CRITICAL_THRESHOLD`, etc.) and all pulse animation params are also in `config.h`.
