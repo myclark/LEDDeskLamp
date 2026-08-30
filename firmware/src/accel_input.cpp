@@ -10,12 +10,20 @@ static void writeReg(uint8_t reg, uint8_t val) {
     Wire.endTransmission();
 }
 
+// Returns 0 rather than Wire.read()'s -1 when the transaction fails (bus glitch, the
+// I2C_TIMEOUT_MS bound expiring, the part not answering). That default matters: -1 truncates
+// to 0xFF, which has the Sclick bit set — so a wedged bus would have looked like an unbroken
+// stream of taps to updateAccelInput() instead of silence. Failing to "no event" degrades to
+// "the accelerometer stops responding", which is inert, rather than to phantom gestures.
 static uint8_t readReg(uint8_t reg) {
     Wire.beginTransmission(LIS3DH_I2C_ADDR);
     Wire.write(reg);
     Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)LIS3DH_I2C_ADDR, (uint8_t)1);
-    return Wire.read();
+    if (Wire.requestFrom((uint8_t)LIS3DH_I2C_ADDR, (uint8_t)1) != 1) {
+        DEBUG_PRINTLN("ACCEL: I2C read failed");
+        return 0;
+    }
+    return (uint8_t)Wire.read();
 }
 
 // Both scale factors are fixed by the ±2g full-scale range (CTRL_REG4) and 100 Hz ODR
@@ -23,7 +31,11 @@ static uint8_t readReg(uint8_t reg) {
 static uint8_t mgToThs(uint16_t mg) { return (uint8_t)(mg / 16); }        // 16 mg per LSB
 static uint8_t msToDuration(uint16_t ms) { return (uint8_t)(ms / 10); }   // 10 ms per LSB @ 100 Hz
 
+// Debug-only: the DEBUG_PRINT macros compile to nothing in a release build, but the readReg()
+// calls would not — 14 I2C round trips every boot whose results are then discarded, and up to
+// 14 x I2C_TIMEOUT_MS of boot stall if the bus is wedged. Guard the body, not just the prints.
 void accelDumpConfig() {
+#if DEBUG
     struct { uint8_t reg; const char* name; } regs[] = {
         { 0x0F, "WHO_AM_I  " },  // Should be 0x33
         { 0x20, "CTRL_REG1 " },  // ODR + axes
@@ -51,9 +63,16 @@ void accelDumpConfig() {
         DEBUG_PRINTLN2(val, HEX);
     }
     DEBUG_PRINTLN("ACCEL: -----------------");
+#endif
 }
 
 void accelInit() {
+    // Own the INT1 line explicitly. updateAccelInput() polls it with digitalRead() every
+    // loop() iteration and nothing else configures it — relying on the pin happening to come
+    // out of reset (or out of esp_deep_sleep_enable_gpio_wakeup()) as a plain input leaves
+    // the gesture engine's only input source unowned.
+    pinMode(LIS3DH_INT_PIN, INPUT);
+
     writeReg(0x20, LIS3DH_CTRL_REG1);  // ODR, low-power mode, axes
     writeReg(0x21, 0x05);               // High-pass filter for click (bit2) and for the
                                          // motion-wake generator (HPIS1, bit0) — without

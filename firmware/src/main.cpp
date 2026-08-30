@@ -22,6 +22,35 @@ RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t bootCount = 0;
 
+#ifdef USE_POT_INPUT
+// Auto-off latch (pot mode only).
+//
+// In pot mode the dial is a *level*, not an event: after auto-off turns the lamp off, the pot
+// is still sitting above POT_ON_HYSTERESIS, so the very next loop() iteration sees "pot wants
+// ON, lamp is OFF" and relights it — resetting the interaction timer as it goes. Without this
+// latch the 4-hour auto-off is a no-op that dips the light for one tick every four hours and
+// otherwise burns the cell indefinitely.
+//
+// So auto-off records the dial position it fired at, and refuses to turn back on until the
+// pot actually moves more than POT_MOVEMENT_DEADBAND away from it — the same "real movement,
+// not ADC jitter" test the interaction timer already uses. It lives in RTC memory because the
+// lamp deep-sleeps DEEP_SLEEP_TIMEOUT_MS later: without persistence, any bump that woke the
+// device (a door closing, a passing truck) would find the pot still up and relight for
+// another four hours, which is exactly the unattended drain auto-off exists to prevent.
+RTC_DATA_ATTR bool potAutoOffLatched = false;
+RTC_DATA_ATTR uint16_t potAutoOffTarget = 0;
+
+// True when the pot has been moved far enough since auto-off fired to count as the user
+// asking for light again. Always true when no auto-off is pending.
+static bool potAutoOffLatchCleared(uint16_t target) {
+  if (!potAutoOffLatched) return true;
+  if (abs((int)target - (int)potAutoOffTarget) <= POT_MOVEMENT_DEADBAND) return false;
+  potAutoOffLatched = false;
+  DEBUG_PRINTLN("Pot moved since auto-off — latch cleared");
+  return true;
+}
+#endif
+
 // Forward declarations
 void enterDeepSleep();
 
@@ -57,8 +86,8 @@ void handleSingleTap() {
   if (currentLampState == ON) {
     turnOff();
   } else {
-    // Fresh battery reading before turning on
-    readBatteryVoltage();
+    // Fresh battery reading + state update before turning on
+    refreshBatteryState();
     BatteryState batteryState = getBatteryState();
 
     if (batteryState == BATTERY_CUTOFF) {
@@ -103,7 +132,7 @@ void handleTripleTap() {
   lastInteractionTime = millis();
   if (currentLampState != ON) return;
 
-  readBatteryVoltage();
+  refreshBatteryState();
   setTouchBlocked(true);
   showBatteryIndicator(getBatteryState());
 }
@@ -145,11 +174,14 @@ static void updatePotControl() {
   static uint16_t lastInteractionTarget = 0;
 
   if (wantsOn && currentLampState != ON) {
+    // Auto-off leaves the dial sitting above the on-threshold; don't relight until it moves.
+    if (!potAutoOffLatchCleared(target)) return;
+
     DEBUG_PRINTLN(">>> POT: requesting ON");
     lastInteractionTime = millis();
     lastInteractionTarget = target;
 
-    readBatteryVoltage();
+    refreshBatteryState();
     BatteryState batteryState = getBatteryState();
     if (batteryState == BATTERY_CUTOFF) {
       DEBUG_PRINTLN("Battery CUTOFF - refusing to turn on, entering deep sleep");
@@ -168,7 +200,9 @@ static void updatePotControl() {
   } else if (!wantsOn && currentLampState == ON) {
     DEBUG_PRINTLN(">>> POT: requesting OFF");
     lastInteractionTime = millis();
-    turnOff();
+    // Ramp down on the same curve the dial tracks on, rather than turnOff()'s much faster
+    // fixed crossfade — see turnOffSlewed() in led_control.cpp.
+    turnOffSlewed();
   } else if (wantsOn && currentLampState == ON) {
     setBrightnessTarget(target);
     // Only count real movement as interaction — filters ADC jitter that would
@@ -216,6 +250,17 @@ static void updateAccelInput() {
   static unsigned long suppressStart = 0;
   static unsigned long waitingStartTime = 0;
 
+  // Fault backoff — see LIS3DH_FAULT_EMPTY_READS in config.h.
+  static bool faulted = false;
+  static unsigned long faultTime = 0;
+  static uint8_t emptySrcCount = 0;
+
+  if (faulted) {
+    if (millis() - faultTime < LIS3DH_FAULT_BACKOFF_MS) return;
+    faulted = false;
+    emptySrcCount = 0;
+  }
+
   if (state == RING_SUPPRESS) {
     if (millis() - suppressStart >= LIS3DH_RING_SUPPRESS_MS) {
       state = WAITING;
@@ -243,9 +288,18 @@ static void updateAccelInput() {
     DEBUG_PRINT("ACCEL: tap detected: ");
     debugClickSrc(src);
     if ((src >> 4) & 0x01) {  // Sclick
+      emptySrcCount = 0;
       tapCount++;
       suppressStart = millis();
       state = RING_SUPPRESS;
+    } else if (++emptySrcCount >= LIS3DH_FAULT_EMPTY_READS) {
+      // Reading CLICK_SRC should have cleared the latch and dropped INT1. It didn't, and
+      // there's no click to report — the read isn't getting through. Stop hammering the bus.
+      DEBUG_PRINTLN("ACCEL: INT1 stuck HIGH with no click event — backing off");
+      faulted = true;
+      faultTime = millis();
+      tapCount = 0;
+      state = IDLE;
     }
   }
 }
@@ -298,12 +352,22 @@ void setup() {
   // Check wakeup reason before module init
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
+  // Release every pin hold enterDeepSleep() may have latched — unconditionally, before any
+  // module reconfigures these pins (a held pin ignores pinMode()/digitalWrite() until the
+  // hold is explicitly disabled).
+  //
+  // Deliberately NOT gated on wakeup_reason: WARM_LED_PIN (5) and POT_POWER_PIN (4) are
+  // RTC-capable, so their holds are latched in the RTC domain and survive a system reset —
+  // only a power-on reset or an explicit gpio_hold_dis() clears them. If the device resets
+  // for any other reason after enterDeepSleep() latched them (watchdog panic, brownout, EN
+  // pin) it comes back with a reason of RESET rather than WAKEUP_GPIO, skipping the release
+  // — and then the pot divider stays unpowered, the pot reads 0, the lamp can never turn on,
+  // and it sleeps forever. Calling hold_dis on a pin that isn't held is a no-op, so making
+  // this unconditional costs nothing and removes the whole failure mode.
+  gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
+  gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
 #ifdef USE_POT_INPUT
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
-    // Release the hold before initPotInput() reconfigures this pin — a held pin won't
-    // respond to pinMode()/digitalWrite() until the hold is explicitly disabled.
-    gpio_hold_dis((gpio_num_t)POT_POWER_PIN);
-  }
+  gpio_hold_dis((gpio_num_t)POT_POWER_PIN);
 #endif
 
   // Initialize modules
@@ -342,10 +406,7 @@ void setup() {
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
     DEBUG_PRINTLN("Woke from deep sleep!");
-
-    // Disable GPIO hold to allow PWM control again
-    gpio_hold_dis((gpio_num_t)WHITE_LED_PIN);
-    gpio_hold_dis((gpio_num_t)WARM_LED_PIN);
+    // (Pin holds were already released unconditionally above.)
 
 #ifdef USE_POT_INPUT
     // The motion that woke us doesn't necessarily mean "turn on" — it might just be the
@@ -356,28 +417,42 @@ void setup() {
     // device straight back to sleep.
     accelReadInt1Src();
     updatePotInput();
-    if (isPotRequestingOn()) {
+    uint16_t wakeTarget = getPotBrightnessTarget();
+    if (!isPotRequestingOn()) {
+      DEBUG_PRINTLN("Woke but pot is still at OFF — going back to sleep shortly");
+    } else if (!potAutoOffLatchCleared(wakeTarget)) {
+      // Auto-off fired before this sleep and the dial hasn't moved since — the bump that
+      // woke us isn't a request for light. Stay OFF and let the deep-sleep timer re-sleep.
+      DEBUG_PRINTLN("Woke but auto-off latch still holds — going back to sleep shortly");
+    } else if (getBatteryState() == BATTERY_CUTOFF) {
+      // initBatteryMonitor() already took a real reading and ran the state machine, so this
+      // is a live verdict, not the stale NORMAL initialiser.
+      DEBUG_PRINTLN("Battery CUTOFF on wake - refusing to turn on, going back to sleep");
+      enterDeepSleep();
+    } else {
       lastInteractionTime = millis();
-      uint16_t target = getPotBrightnessTarget();
       turnOnAtZero(savedMode);
-      setBrightnessTarget(target);
+      setBrightnessTarget(wakeTarget);
 
-      readBatteryVoltage();
       BatteryState batteryState = getBatteryState();
       if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
         showBatteryIndicator(batteryState);
       }
-    } else {
-      DEBUG_PRINTLN("Woke but pot is still at OFF — going back to sleep shortly");
     }
 #else
     lastInteractionTime = millis();
+
+    // initBatteryMonitor() already took a real reading and ran the state machine.
+    BatteryState batteryState = getBatteryState();
+    if (batteryState == BATTERY_CUTOFF) {
+      DEBUG_PRINTLN("Battery CUTOFF on wake - refusing to turn on, going back to sleep");
+      enterDeepSleep();
+    }
+
     // Restore saved mode and brightness
     turnOn(savedMode, *getModeBrightness(savedMode));
 
     // Auto battery indicator when LOW or CRITICAL on wake
-    readBatteryVoltage();
-    BatteryState batteryState = getBatteryState();
     if (batteryState == BATTERY_LOW || batteryState == BATTERY_CRITICAL) {
       setTouchBlocked(true);
       showBatteryIndicator(batteryState);
@@ -465,12 +540,33 @@ void loop() {
     }
   }
 
+  // Battery CUTOFF while the lamp is running: the turn-on checks elsewhere only cover
+  // *starting* the lamp, but the cell can equally cross below BATTERY_CUTOFF_THRESHOLD hours
+  // into a session. Left alone the lamp would keep drawing current all the way into
+  // deep-discharge territory, which is the one thing the CUTOFF state exists to prevent.
+  // turnOff() rather than turnOffSlewed(): enterDeepSleep() forces the LED pins LOW
+  // immediately anyway, so a ramp here would be invisible as well as pointless.
+  if (currentLampState == ON && getBatteryState() == BATTERY_CUTOFF) {
+    DEBUG_PRINTLN("Battery CUTOFF while ON - shutting down");
+    turnOff();
+    enterDeepSleep();
+  }
+
   // Auto-off: turn off after AUTO_OFF_TIMEOUT_MS of no user interaction
 #if AUTO_OFF_ENABLED
   if (currentLampState == ON && !isPlayingIndicator()) {
     if (millis() - lastInteractionTime >= AUTO_OFF_TIMEOUT_MS) {
       DEBUG_PRINTLN("Auto-off: no interaction timeout");
+#ifdef USE_POT_INPUT
+      // Latch against the dial's current position — otherwise the next loop() iteration sees
+      // the pot still above the on-threshold and relights immediately. See the latch comment
+      // at the top of this file.
+      potAutoOffTarget = getPotBrightnessTarget();
+      potAutoOffLatched = true;
+      turnOffSlewed();
+#else
       turnOff();
+#endif
     }
   }
 #endif

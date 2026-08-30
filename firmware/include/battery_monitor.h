@@ -14,8 +14,14 @@ enum BatteryState {
 // Initialize battery monitoring (call from setup)
 void initBatteryMonitor();
 
-// Read current battery voltage
+// Read current battery voltage. Pure read — does NOT update the cached voltage or the state
+// machine; use refreshBatteryState() for that.
 float readBatteryVoltage();
+
+// Take a fresh reading and run the state machine on it immediately, so getBatteryState() is
+// current. For decision points that can't wait for the next periodic update — turn-on,
+// deep-sleep wake, on-demand battery check.
+void refreshBatteryState();
 
 // Get current battery state (state machine with hysteresis)
 BatteryState getBatteryState();
