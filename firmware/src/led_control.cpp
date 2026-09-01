@@ -10,6 +10,8 @@
 static void triggerBoundaryFlash();
 static uint16_t getCompensatedPWM(uint16_t brightnessLevel);
 static uint16_t clampToBatteryLimit(uint16_t requested);
+static void applyBrightnessPWM();
+static void finishFadeOut();
 
 // LEDC channels for ESP32 PWM
 #define WHITE_LED_CHANNEL 0
@@ -64,6 +66,10 @@ static uint16_t brightnessSlewTarget = 0;
 static float brightnessSlewCurrent = 0.0f;
 static unsigned long lastSlewUpdateTime = 0;
 static bool slewInitialized = false;
+// True while turnOffSlewed()'s ramp-down is still running: the lamp is already logically OFF
+// (so main.cpp's deep-sleep timer and pot edge detection behave exactly as before), but the
+// slew still owns the PWM output until the ramp reaches the bottom. See turnOffSlewed().
+static bool slewFadingOut = false;
 
 // Battery indicator state
 static bool indicatorPlaying = false;
@@ -94,6 +100,8 @@ void initLED() {
 }
 
 void turnOn(uint8_t mode, uint16_t brightnessLevel) {
+  slewFadingOut = false;  // A crossfade turn-on supersedes any ramp-down still in flight
+
   // Re-attach PWM pins when coming from OFF (they may have been detached)
   if (currentLampState == OFF) {
     ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
@@ -127,6 +135,20 @@ void turnOn(uint8_t mode, uint16_t brightnessLevel) {
 }
 
 void turnOnAtZero(uint8_t mode) {
+  // Interrupting a ramp-down (the pot came back up before turnOffSlewed()'s fade finished):
+  // the LED is still lit at a partially-decayed level and the PWM pins are still attached,
+  // so just hand control back to the slew from exactly where the light is. Zeroing and
+  // re-ramping from the bottom, as the normal path below does, would flash the lamp black
+  // for a tick and then replay the whole ease-in.
+  if (slewFadingOut && mode == currentMode) {
+    slewFadingOut = false;
+    currentLampState = ON;
+    isTransitioning = false;
+    DEBUG_PRINTLN("ON (resuming interrupted ramp-down)");
+    return;
+  }
+  slewFadingOut = false;
+
   if (currentLampState == OFF) {
     ledcAttachPin(WHITE_LED_PIN, WHITE_LED_CHANNEL);
     ledcAttachPin(WARM_LED_PIN, WARM_LED_CHANNEL);
@@ -150,7 +172,13 @@ void turnOnAtZero(uint8_t mode) {
   DEBUG_PRINTLN(mode == MODE_COOL ? "COOL" : "WARM");
 }
 
+// Immediate off: hands the visible fade to updateModeTransition()'s fixed-duration
+// MODE_TRANSITION_MS crossfade. This is button mode's off path, and the one to use when the
+// lamp needs to be off promptly regardless of feel (battery CUTOFF shutdown). Pot mode uses
+// turnOffSlewed() below instead, so that crossing the dial's off threshold looks like the
+// bottom of the dimming ramp rather than a separate, much faster animation.
 void turnOff() {
+  slewFadingOut = false;
   currentLampState = OFF;
   targetWhitePWM = 0;
   targetWarmPWM = 0;
@@ -160,6 +188,41 @@ void turnOff() {
   isTransitioning = true;
   slewInitialized = false;  // Re-seed brightness slew cleanly on the next turnOn()
   DEBUG_PRINTLN("State: OFF");
+}
+
+// Pot mode's off path: keep easing the applied brightness down with the *same* exponential
+// curve and time constant (BRIGHTNESS_SLEW_TIME_CONSTANT_MS) that live pot tracking already
+// uses, instead of handing the fade to turnOff()'s much faster fixed-duration crossfade.
+//
+// Without this, turning the dial down past POT_OFF_THRESHOLD abandoned the slew mid-ramp:
+// the pot's own input filter (POT_FILTER_TIME_CONSTANT_MS, ~30 ms) settles far faster than
+// the output slew (~1000 ms), so on a quick turn-down the off threshold was crossed while
+// the eased brightness was still near the top — and the lamp cut from there to black over
+// MODE_TRANSITION_MS in raw PWM-duty space. The ramp *up* eased over seconds; the ramp
+// *down* snapped. Now both ends use one curve.
+//
+// The lamp goes logically OFF immediately (so main.cpp's OFF-edge detection, deep-sleep
+// timer and auto-off all behave exactly as before) — only the PWM output keeps ramping,
+// owned by updateBrightnessSlew() until finishFadeOut() lands it at zero.
+void turnOffSlewed() {
+  if (currentLampState == OFF && !slewFadingOut) return;  // Already off and settled
+
+  currentLampState = OFF;
+  isTransitioning = false;  // The slew owns the output for this fade, not the crossfade
+  // Cancel any battery pulse in flight. Unlike button mode — where taps are blocked for the
+  // duration via setTouchBlocked() — the pot is polled regardless, so the dial really can
+  // reach the off threshold mid-pulse. The indicator drives the same channel the ramp-down
+  // does, and its own completion path declines to restore anything once the lamp is OFF, so
+  // leaving it running would stall the ramp and then hand back a stale duty. The lamp is
+  // being turned off; the reminder is moot.
+  indicatorPlaying = false;
+  brightnessSlewTarget = 0;
+  brightnessSlewCurrent = (float)brightness;
+  lastSlewUpdateTime = millis();
+  slewInitialized = true;
+  slewFadingOut = true;
+
+  DEBUG_PRINTLN("State: OFF (ramping down via slew)");
 }
 
 void swapMode(uint8_t newMode, uint16_t newBrightness) {
@@ -293,6 +356,13 @@ void calculateGammaLUT() {
 }
 
 static uint16_t getCompensatedPWM(uint16_t brightnessLevel) {
+  // Defensive: gammaLUT has exactly MAX_BRIGHTNESS + 1 entries and every call site is
+  // supposed to clamp before getting here, but `brightness` is an extern global that any
+  // module could in principle set. An out-of-range index would read past an 8 KB table and
+  // hand the LED an arbitrary duty; costing one compare per PWM update to make that
+  // impossible is worth it in firmware that has to run unattended for months.
+  if (brightnessLevel > MAX_BRIGHTNESS) brightnessLevel = MAX_BRIGHTNESS;
+
   uint16_t basePWM = gammaLUT[brightnessLevel];
 
   float factor = getBrightnessCompensationFactor();
@@ -385,9 +455,59 @@ void setBrightnessTarget(uint16_t target) {
   }
 }
 
+// Writes the current `brightness` to whichever channel the active mode drives, and syncs the
+// crossfade's bookkeeping so a later mode swap starts from the right place.
+static void applyBrightnessPWM() {
+  uint16_t pwm = getCompensatedPWM(brightness);
+  if (currentMode == MODE_COOL) {
+    currentWhitePWM = pwm;
+    targetWhitePWM  = pwm;
+    ledcWrite(WHITE_LED_CHANNEL, pwm);
+  } else {
+    currentWarmPWM = pwm;
+    targetWarmPWM  = pwm;
+    ledcWrite(WARM_LED_CHANNEL, pwm);
+  }
+}
+
+// Lands a turnOffSlewed() ramp-down at zero: mirrors what updateModeTransition() does at the
+// end of a crossfade to OFF, so the PWM peripheral is released and both pins are driven hard
+// LOW rather than left attached at a near-zero duty (which is what actually matters for the
+// deep-sleep leakage the pin-hold in enterDeepSleep() guards against).
+static void finishFadeOut() {
+  slewFadingOut = false;
+  slewInitialized = false;  // Re-seed cleanly on the next turn-on
+  brightness = 0;
+  brightnessSlewCurrent = 0.0f;
+  currentWhitePWM = 0; targetWhitePWM = 0;
+  currentWarmPWM  = 0; targetWarmPWM  = 0;
+
+  ledcWrite(WHITE_LED_CHANNEL, 0);
+  ledcWrite(WARM_LED_CHANNEL, 0);
+  ledcDetachPin(WHITE_LED_PIN);
+  ledcDetachPin(WARM_LED_PIN);
+  pinMode(WHITE_LED_PIN, OUTPUT);
+  pinMode(WARM_LED_PIN, OUTPUT);
+  digitalWrite(WHITE_LED_PIN, LOW);
+  digitalWrite(WARM_LED_PIN, LOW);
+  DEBUG_PRINTLN("OFF: ramp-down complete, PWM detached, pins forced LOW");
+}
+
 void updateBrightnessSlew() {
-  // Let the power-on crossfade and boundary flash own the PWM output while they're active.
-  if (!slewInitialized || currentLampState != ON || isTransitioning || boundaryFlashActive) return;
+  if (!slewInitialized) return;
+
+  // Let the power-on crossfade, the boundary flash and the battery indicator own the PWM
+  // output while they're active — but keep the slew's clock current while yielding, so the
+  // first tick afterwards sees a normal ~1 ms dt instead of the whole animation's duration
+  // (which would produce an alpha near 1 and jump straight to the target).
+  //
+  // A logically-OFF lamp yields too, *except* while slewFadingOut: that's turnOffSlewed()'s
+  // ramp-down, which is exactly the case where the slew must keep running past the OFF edge.
+  if (isTransitioning || boundaryFlashActive || indicatorPlaying ||
+      (currentLampState != ON && !slewFadingOut)) {
+    lastSlewUpdateTime = millis();
+    return;
+  }
 
   unsigned long now = millis();
   unsigned long dt = now - lastSlewUpdateTime;
@@ -403,19 +523,21 @@ void updateBrightnessSlew() {
   // brightness at the ceiling; turning back down below it, the (still-continuous) eased
   // value crosses back under the cap and tracking resumes with no jump.
   uint16_t newBrightness = clampToBatteryLimit((uint16_t)(brightnessSlewCurrent + 0.5f));
+
+  // An exponential decay never actually reaches zero, so a ramp-down needs a defined end.
+  // Finish it once the gamma curve bottoms out at MIN_PWM_DUTY: below that point every
+  // further step of the ease writes the same ~0.4%-duty floor, so the remaining several
+  // seconds of decay are invisible — the light is already at its dimmest distinguishable
+  // level, and stepping from there to black is the same single step the floor already is.
+  if (slewFadingOut && getCompensatedPWM(newBrightness) <= MIN_PWM_DUTY) {
+    finishFadeOut();
+    return;
+  }
+
   if (newBrightness == brightness) return;
 
   brightness = newBrightness;
-  uint16_t pwm = getCompensatedPWM(brightness);
-  if (currentMode == MODE_COOL) {
-    currentWhitePWM = pwm;
-    targetWhitePWM  = pwm;
-    ledcWrite(WHITE_LED_CHANNEL, pwm);
-  } else {
-    currentWarmPWM = pwm;
-    targetWarmPWM  = pwm;
-    ledcWrite(WARM_LED_CHANNEL, pwm);
-  }
+  applyBrightnessPWM();
 }
 
 void playBatteryIndicator(BatteryState state) {
@@ -504,4 +626,8 @@ void updateBatteryIndicator() {
 
 bool isPlayingIndicator() {
   return indicatorPlaying;
+}
+
+bool isFadingToOff() {
+  return slewFadingOut;
 }

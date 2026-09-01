@@ -18,9 +18,13 @@ void initBatteryMonitor() {
   // (voltage divider brings 4.2V max down to ~1.04V, well within range)
   analogSetAttenuation(ADC_11db);
 
-  // Read initial voltage
-  lastBatteryVoltage = readBatteryVoltage();
-  lastBatteryReadTime = millis();
+  // Seed the cached voltage *and* run the state machine on it, so getBatteryState() reflects
+  // the real battery from the first loop() iteration. Without this, currentBatteryState sits
+  // at its BATTERY_NORMAL initialiser until updateBatteryMonitor() first fires
+  // BATTERY_READ_INTERVAL_MS (30 s) later — which meant every turn-on and every deep-sleep
+  // wake in that window saw "NORMAL" no matter how flat the cell actually was, silently
+  // disabling both the CUTOFF refusal-to-turn-on and the LOW/CRITICAL warning pulse.
+  refreshBatteryState();
   lastBatteryDisplayTime = millis();
 
   DEBUG_PRINTLN("Battery monitor initialized");
@@ -53,6 +57,21 @@ float readBatteryVoltage() {
   return voltage;
 }
 
+// Takes a fresh reading and runs the state machine on it, right now — for the decision
+// points that can't wait for the next BATTERY_READ_INTERVAL_MS tick (turn-on, deep-sleep
+// wake, on-demand battery check). readBatteryVoltage() alone does *not* do this: it returns
+// a voltage and touches nothing, so calling it and then getBatteryState() just re-reads
+// whatever the periodic monitor last decided.
+//
+// Note the CRITICAL_CONSECUTIVE_THRESHOLD noise filter still applies, so a single call can't
+// jump straight to CRITICAL — but it can reach CUTOFF, which is the transition that has to be
+// immediate.
+void refreshBatteryState() {
+  lastBatteryVoltage = readBatteryVoltage();
+  lastBatteryReadTime = millis();
+  updateBatteryStateMachine(lastBatteryVoltage + BMS_VOLTAGE_DROP);
+}
+
 BatteryState getBatteryState() {
   return currentBatteryState;
 }
@@ -62,13 +81,19 @@ float getLastBatteryVoltage() {
 }
 
 uint16_t getBatteryLimitedMaxBrightness() {
-  if (currentBatteryState == BATTERY_CRITICAL) {
+  // CUTOFF shares CRITICAL's ceiling rather than falling through to MAX_BRIGHTNESS. It is
+  // NOT moot: the lamp refuses to *turn on* at CUTOFF, but the battery can also cross into
+  // CUTOFF while the lamp is already running, and returning MAX_BRIGHTNESS there would
+  // *raise* the ceiling from CRITICAL_MAX_BRIGHTNESS back to full — the lamp getting
+  // brighter as the cell dies. main.cpp shuts the lamp down on that transition; this keeps
+  // the ceiling monotonic in the meantime.
+  if (currentBatteryState == BATTERY_CRITICAL || currentBatteryState == BATTERY_CUTOFF) {
     return CRITICAL_MAX_BRIGHTNESS;
   }
   if (currentBatteryState == BATTERY_LOW) {
     return LOW_MAX_BRIGHTNESS;
   }
-  return MAX_BRIGHTNESS;  // NORMAL, and CUTOFF (moot — the lamp refuses to turn on there)
+  return MAX_BRIGHTNESS;
 }
 
 float calculateCompensationFactor(float voltage) {
@@ -178,14 +203,10 @@ void updateBatteryMonitor() {
     float previousVoltage = lastBatteryVoltage;
     BatteryState previousState = currentBatteryState;
 
-    lastBatteryVoltage = readBatteryVoltage();
-    lastBatteryReadTime = millis();
+    refreshBatteryState();
 
     // Add BMS voltage drop to estimate actual battery terminal voltage
     float batteryVoltage = lastBatteryVoltage + BMS_VOLTAGE_DROP;
-
-    // Update state machine
-    updateBatteryStateMachine(batteryVoltage);
 
     // Display voltage changes or state transitions
     bool significantChange = abs(lastBatteryVoltage - previousVoltage) > 0.1;

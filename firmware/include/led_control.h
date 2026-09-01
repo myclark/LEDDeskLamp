@@ -16,7 +16,21 @@ void initLED();
 
 // Power control
 void turnOn(uint8_t mode, uint16_t brightnessLevel);
+
+// Immediate off — the visible fade is updateModeTransition()'s fixed MODE_TRANSITION_MS
+// crossfade. Button mode's off path, and the right one whenever the lamp needs to be off
+// promptly regardless of feel (e.g. the battery CUTOFF shutdown).
 void turnOff();
+
+// Pot mode's off path: ramps the output down through updateBrightnessSlew() using the same
+// exponential curve and BRIGHTNESS_SLEW_TIME_CONSTANT_MS as live pot tracking, so the dial's
+// off threshold is the bottom of the dimming ramp rather than a separate, much faster
+// animation. The lamp reports OFF immediately — only the PWM output keeps ramping — so
+// callers' OFF-edge, auto-off and deep-sleep logic is unaffected.
+void turnOffSlewed();
+
+// True while a turnOffSlewed() ramp-down is still running (lamp already logically OFF).
+bool isFadingToOff();
 
 // Turns on at brightness 0 with no crossfade — for callers that immediately follow with
 // setBrightnessTarget() to ramp up via updateBrightnessSlew() instead (potentiometer

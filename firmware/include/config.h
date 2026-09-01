@@ -118,6 +118,13 @@
 // Exponential smoothing time constant for live brightness tracking (potentiometer mode).
 // Larger = slower, dreamier follow; smaller = snappier/more direct. At this time constant,
 // brightness reaches ~95% of a new target after roughly 3x this value in ms.
+//
+// This one constant governs all three directions of pot-mode brightness movement: the ramp
+// up at turn-on, live tracking as the dial moves, and the ramp down to off when the dial
+// crosses POT_OFF_THRESHOLD (turnOffSlewed() in led_control.cpp). That last one deliberately
+// does NOT use MODE_TRANSITION_MS — the ramp down is meant to be the bottom of the dimming
+// curve, not a separate, much faster animation. At the current values that's ~2.99 s up to
+// 95% of full and ~2.51 s down to dark from full.
 #define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 1000
 
 // Timing thresholds (milliseconds)
@@ -318,6 +325,16 @@
 #if ACCEL_MODE_SWAP_TAP_COUNT < 2 || ACCEL_MODE_SWAP_TAP_COUNT > 3
 #error "ACCEL_MODE_SWAP_TAP_COUNT must be 2 or 3 — a single tap must stay reserved as the incidental-bump filter (see doc/accel_input_integration.md)."
 #endif
+// Fault backoff for a non-clearing INT1 line. Reading CLICK_SRC is what clears the latch, so
+// INT1 staying HIGH while CLICK_SRC reports no click means the read isn't getting through —
+// a wedged I2C bus (readReg() fails closed to 0 in accel_input.cpp) or a stuck line. Left
+// unbounded, updateAccelInput() would then run two I2C transactions per loop() iteration,
+// each bounded only by I2C_TIMEOUT_MS, dragging loop() from ~1 ms to ~100 ms and turning the
+// brightness ramp visibly steppy. After this many consecutive empty reads, stop polling the
+// accelerometer for LIS3DH_FAULT_BACKOFF_MS and then retry — it recovers on its own if the
+// bus does, and the lamp's primary input is unaffected either way.
+#define LIS3DH_FAULT_EMPTY_READS  10
+#define LIS3DH_FAULT_BACKOFF_MS   1000
 // Dead time after each detected tap to absorb that tap's own ring-down before watching for
 // the next one in the sequence.
 #define LIS3DH_RING_SUPPRESS_MS   300

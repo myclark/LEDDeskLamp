@@ -11,7 +11,7 @@ pio run                                  # Build
 pio run -t upload                        # Flash
 pio device monitor                       # Serial monitor (115200 baud)
 pio run -t upload && pio device monitor  # Flash + monitor
-pio test -e native                       # Run native unit tests (53 tests, no hardware needed)
+pio test -e native                       # Run native unit tests (61 tests, no hardware needed)
 ```
 
 **IDE note:** Clang errors about `Arduino.h`, `millis()`, `HIGH` etc. are expected — ESP32 symbols are only visible to PlatformIO, not the IDE analyser.
@@ -35,7 +35,7 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 | Module | Responsibility |
 |--------|---------------|
 | `config.h` | All constants: pins, timing, battery thresholds, brightness, pulse params |
-| `led_control` | OFF/ON state, gamma-corrected PWM, non-blocking crossfade + flash animations, brightness slew (pot mode) |
+| `led_control` | OFF/ON state, gamma-corrected PWM, non-blocking crossfade + flash animations, brightness slew and eased ramp-down (pot mode) |
 | `pot_input` | Potentiometer mode: ADC → brightness mapping, on/off hysteresis (pure/testable) |
 | `touch_input` | Button mode: hardware-agnostic input → gesture decoder (single/double/triple tap, long press) |
 | `battery_monitor` | ADC averaging, state machine (NORMAL/LOW/CRITICAL/CUTOFF), brightness limiting |
@@ -51,7 +51,7 @@ All config in `include/config.h`. Modules are decoupled via callbacks; `main.cpp
 
 | Input | OFF | ON |
 |-------|-----|----|
-| Turn pot | Turning above the on-threshold turns on at that brightness | Brightness tracks pot position live (eased ramp); turning to/below the off-threshold turns off |
+| Turn pot | Turning above the on-threshold turns on at that brightness (eased ramp up) | Brightness tracks pot position live (eased ramp); turning to/below the off-threshold ramps down to off on the *same* eased curve (`turnOffSlewed()`), not a separate faster fade |
 | Tap lamp body `ACCEL_MODE_SWAP_TAP_COUNT` times (accelerometer, default 2 = double tap) | No effect | Swap WARM ↔ COOL (crossfade) |
 
 Any other tap count on the lamp body, including a single tap, is ignored — not just while OFF. This is an exact match, not "2 or more": turning the pot knob shakes the same enclosure the accelerometer is mounted to, so requiring an exact count keeps ordinary brightness adjustment from randomly swapping modes, and deliberately leaves the *other* of {double, triple} tap free for a future gesture (`ACCEL_MODE_SWAP_TAP_COUNT` in `config.h`, must be 2 or 3).
@@ -69,7 +69,9 @@ Brightness is never persisted — it's always just wherever the pot currently po
 
 Tapping the lamp body `ACCEL_MODE_SWAP_TAP_COUNT` times (LIS3DH accelerometer, optional in button mode — `USE_ACCEL_INPUT`) is an additional trigger for the WARM ↔ COOL swap only; any other count, including a single tap, is ignored.
 
-Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (30 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer.
+Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then deep sleep after `DEEP_SLEEP_TIMEOUT_MS` (30 s). In pot mode, only pot movement past `POT_MOVEMENT_DEADBAND` counts as interaction for the auto-off timer — and auto-off *latches* against the dial's current position (`potAutoOffLatched`/`potAutoOffTarget`, RTC-persisted), so the still-raised pot doesn't just relight the lamp on the next loop iteration. The pot must move past the deadband to turn it back on.
+
+Battery `CUTOFF` reached while the lamp is ON shuts it down and sleeps — not just a refusal to turn on. `refreshBatteryState()` (not bare `readBatteryVoltage()`, which updates nothing) is what makes `getBatteryState()` current at turn-on/wake.
 
 ## Key Config (`include/config.h`)
 
@@ -83,7 +85,7 @@ Auto-off after `AUTO_OFF_TIMEOUT_MS` (default 4 h) of no interaction → then de
 #define ADC_CALIBRATION_FACTOR 0.904 // Tune to match oscilloscope reading
 #define BMS_VOLTAGE_DROP 0.090       // TP4056 MOSFET drop (~90 mV)
 #define WATCHDOG_TIMEOUT_MS 8000     // Reboots if loop() stalls this long (see Timeout Audit & Watchdog in doc/firmware_architecture.md)
-#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 1000  // Pot mode: eased brightness follow speed (output)
+#define BRIGHTNESS_SLEW_TIME_CONSTANT_MS 1000  // Pot mode: eased brightness follow speed (output) — governs the ramp up, live tracking AND the ramp down to off
 #define POT_FILTER_TIME_CONSTANT_MS 30  // Pot mode: raw ADC noise filter, all positions (input)
 #define POT_OFF_THRESHOLD 128        // Pot mode: brightness units at/below which lamp turns off
 #define POT_ON_HYSTERESIS 208        // Pot mode: brightness units at/above which lamp turns on

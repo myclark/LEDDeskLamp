@@ -165,9 +165,13 @@ void test_battery_limited_brightness(void) {
   currentBatteryState = BATTERY_CRITICAL;
   TEST_ASSERT_EQUAL(CRITICAL_MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
 
-  // CUTOFF state - doesn't matter, lamp won't turn on, but should return MAX
+  // CUTOFF state - must NOT fall through to MAX_BRIGHTNESS. The ceiling has to be monotonic
+  // as the cell drains: a battery that crosses CRITICAL -> CUTOFF while the lamp is already
+  // running would otherwise have its brightness ceiling *raised* from ~25% back to full,
+  // making the lamp brighter the flatter the battery got.
   currentBatteryState = BATTERY_CUTOFF;
-  TEST_ASSERT_EQUAL(MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
+  TEST_ASSERT_EQUAL(CRITICAL_MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
+  TEST_ASSERT_LESS_OR_EQUAL_UINT16(CRITICAL_MAX_BRIGHTNESS, getBatteryLimitedMaxBrightness());
 }
 
 // Test: Brightness compensation factor at reference voltage (3.5V)

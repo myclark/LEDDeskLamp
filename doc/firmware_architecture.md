@@ -46,9 +46,42 @@ brightness, always.
   toward that target with an exponential filter (`BRIGHTNESS_SLEW_TIME_CONSTANT_MS`), so
   fast pot movements produce a smooth, slightly-lagging ramp rather than an instant jump —
   turning the pot back and forth quickly still "tracks" the user, just softened.
+- **Ramping off (`turnOffSlewed()`):** crossing `POT_OFF_THRESHOLD` on the way down keeps
+  the *same* exponential curve rather than switching animations. This used to be
+  asymmetric: the off edge called `turnOff()`, which abandons the slew mid-ramp and hands
+  the fade to `updateModeTransition()`'s fixed `MODE_TRANSITION_MS` (400 ms) linear
+  crossfade in raw PWM-duty space. And because the pot's *input* filter
+  (`POT_FILTER_TIME_CONSTANT_MS`, 30 ms) settles ~30x faster than the *output* slew
+  (~1000 ms), a normal brisk turn-down crossed the off threshold while the eased brightness
+  was still near the top — so the lamp cut to black from near-full in 400 ms, while the ramp
+  *up* eased over ~3 s. Measured on the native test harness: ramp up to 95 % of full takes
+  ~2 990 ms; the ramp down now takes ~2 510 ms, against 400 ms before.
+  `turnOffSlewed()` reports the lamp `OFF` immediately — so the OFF edge, the auto-off timer
+  and the deep-sleep timer all behave exactly as they did — and only the PWM output keeps
+  ramping, owned by `updateBrightnessSlew()` until it lands. Details:
+  - **Termination.** An exponential decay never reaches zero, so the ramp ends where the
+    gamma curve bottoms out at `MIN_PWM_DUTY`: below that point every further step writes
+    the same ~0.4 %-duty floor, so the remaining seconds of decay are invisible. Landing
+    there mirrors what `updateModeTransition()` does at the end of a crossfade to OFF —
+    duty 0, `ledcDetachPin()` both channels, pins driven hard LOW.
+  - **Interruption.** If the dial comes back up mid-ramp, `turnOnAtZero()` detects the
+    in-flight fade and hands control back to the slew from exactly where the light is,
+    instead of zeroing the output and replaying the whole ease-in from black.
+  - `turnOff()` is unchanged and still the right call for button mode and for the battery
+    CUTOFF shutdown, where the lamp needs to be off promptly regardless of feel.
 - **Auto-off interaction:** only pot movement past `POT_MOVEMENT_DEADBAND` counts as
   interaction — this filters ADC jitter that would otherwise reset the auto-off timer
   forever (see Timeout Audit & Watchdog below for why that distinction matters).
+- **Auto-off latch:** a dial is a *level*, not an event, so turning the lamp off underneath
+  a pot that's still up isn't enough on its own — the next `loop()` iteration sees "pot
+  wants ON, lamp is OFF" and relights, resetting the interaction timer as it goes, which
+  made the 4-hour auto-off a no-op that dipped the light for one tick every four hours and
+  otherwise ran the cell flat. Auto-off now records the dial position it fired at
+  (`potAutoOffTarget`) and refuses to relight until the pot moves more than
+  `POT_MOVEMENT_DEADBAND` away from it — the same "real movement, not ADC jitter" test the
+  interaction timer uses. Both live in RTC memory, because the lamp deep-sleeps 30 s later
+  and any bump that woke it would otherwise find the pot still up and relight for another
+  four hours.
 - **Wake-then-check:** since the accelerometer (not the pot) wakes the device from deep
   sleep, a wake doesn't automatically mean "turn on" — it might just be a hand bumping the
   lamp while reaching for the dial. On `ESP_SLEEP_WAKEUP_GPIO`, `setup()` re-powers the pot
@@ -224,7 +257,24 @@ needed to not get 16x slower by accident.
 | NORMAL | > 3.5 V | Full operation |
 | LOW | 3.2–3.5 V | Warning pulse on wake/turn-on, brightness capped at `LOW_MAX_BRIGHTNESS` (~50%), recurring every `BATTERY_INDICATOR_REPEAT_LOW_MS` (20 min) while ON |
 | CRITICAL | 3.0–3.2 V | Warning pulse on every turn-on, brightness capped at `CRITICAL_MAX_BRIGHTNESS` (~25%), recurring every `BATTERY_INDICATOR_REPEAT_CRITICAL_MS` (5 min) while ON |
-| CUTOFF | < 3.0 V | Refuse to turn on, enter deep sleep |
+| CUTOFF | < 3.0 V | Refuse to turn on (and shut down if reached while ON), enter deep sleep; ceiling stays at `CRITICAL_MAX_BRIGHTNESS` |
+
+**CUTOFF while running.** The turn-on checks only cover *starting* the lamp, but the cell
+can equally cross below `BATTERY_CUTOFF_THRESHOLD` hours into a session. `loop()` therefore
+also shuts the lamp down and sleeps on that transition. Relatedly,
+`getBatteryLimitedMaxBrightness()` returns `CRITICAL_MAX_BRIGHTNESS` for CUTOFF rather than
+falling through to `MAX_BRIGHTNESS` — the ceiling has to be monotonic as the cell drains, or
+crossing CRITICAL → CUTOFF would *raise* it from ~25 % back to full and make the lamp
+brighter the flatter the battery got.
+
+**Freshness at the decision points.** `readBatteryVoltage()` is a pure read: it returns a
+voltage and updates nothing. Turn-on, wake and the on-demand check therefore call
+`refreshBatteryState()`, which reads *and* runs the state machine, so `getBatteryState()` is
+a live verdict at the moment of the decision. `initBatteryMonitor()` does the same at boot —
+without it `currentBatteryState` sits at its `BATTERY_NORMAL` initialiser until the first
+periodic update `BATTERY_READ_INTERVAL_MS` (30 s) later, which silently disabled both the
+CUTOFF refusal-to-turn-on and the LOW/CRITICAL warning pulse for every turn-on and every
+deep-sleep wake inside that window.
 
 Hysteresis: LOW→CRITICAL requires 3 consecutive readings (90 s); CRITICAL→LOW needs > 3.3 V; CUTOFF→CRITICAL needs > 3.2 V (typically charging).
 
@@ -260,9 +310,23 @@ The "worsened" memory resets once the battery recovers back to NORMAL, so a futu
 
 ## Power Management
 
-**Deep sleep:** entered after `DEEP_SLEEP_TIMEOUT_MS` (30 s) in OFF state. GPIO10/GPIO5 must use `gpio_hold_en()` before sleep to prevent MOSFET leakage causing LED glow; `gpio_hold_dis()` on wake.
+**Deep sleep:** entered after `DEEP_SLEEP_TIMEOUT_MS` (30 s) in OFF state. GPIO10/GPIO5 must use `gpio_hold_en()` before sleep to prevent MOSFET leakage causing LED glow (pot mode also holds GPIO4 LOW to keep the pot divider unpowered); `gpio_hold_dis()` on the way back.
 
-**Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, `turnOff()` is called; deep sleep timer then starts. `lastInteractionTime` is updated in every gesture callback and on wake from deep sleep.
+**Releasing pin holds is unconditional.** `setup()` calls `gpio_hold_dis()` on all three
+pins at the top, *before* any module reconfigures them — deliberately not gated on
+`wakeup_reason == ESP_SLEEP_WAKEUP_GPIO`. `WARM_LED_PIN` (5) and `POT_POWER_PIN` (4) are
+RTC-capable, so their holds are latched in the RTC domain and survive a *system* reset:
+only a power-on reset or an explicit `gpio_hold_dis()` clears them. If the device resets for
+any reason other than the sleep wake after `enterDeepSleep()` latched them — a watchdog
+panic, a brownout, the EN pin — it comes back with a reset reason that skipped the release,
+and then the pot divider stays unpowered, the pot reads 0, the lamp can never turn on, and
+it sleeps forever. `gpio_hold_dis()` on an unheld pin is a no-op, so making the release
+unconditional costs nothing and removes the whole failure mode.
+
+**Auto-off:** after `AUTO_OFF_TIMEOUT_MS` (4 h) with no user interaction while ON, the lamp
+turns off and the deep sleep timer starts. `lastInteractionTime` is updated in every gesture
+callback and on wake from deep sleep. In pot mode this additionally sets the auto-off latch
+(see Potentiometer mode above) and ramps down via `turnOffSlewed()` rather than `turnOff()`.
 
 **Estimated power (component-datasheet math — not yet measured on real hardware; see `analysis/`):**
 
@@ -304,12 +368,40 @@ overloaded zero value.
 timeout by default — if the bus glitches (e.g. from PWM switching noise) or `INT1` stays
 latched from a failed read, `updateAccelInput()` can block on an I2C transaction every loop
 iteration, stalling the entire `loop()` (and with it, gesture handling, auto-off, and deep
-sleep) with no way to recover. Two mitigations:
+sleep) with no way to recover. Mitigations:
 
 1. `Wire.setTimeOut(I2C_TIMEOUT_MS)` (50 ms, see `config.h`) bounds every I2C transaction so
    a bus glitch fails fast instead of hanging.
-2. **Task watchdog** (`esp_task_wdt`, see below) is the hard backstop for this and any other
+2. `readReg()` (`accel_input.cpp`) checks `Wire.requestFrom()` and fails *closed*, returning
+   0 rather than `Wire.read()`'s −1. That default matters: −1 truncates to `0xFF`, which has
+   the `Sclick` bit set, so a wedged bus would have looked to `updateAccelInput()` like an
+   unbroken stream of taps instead of silence. Failing to "no event" degrades to "the
+   accelerometer stopped responding", which is inert.
+3. `updateAccelInput()` backs off when `INT1` stays HIGH but `CLICK_SRC` reports no click —
+   the signature of a latch that isn't clearing. Reading `CLICK_SRC` is what drops the line,
+   so that combination means the read isn't getting through. Left unbounded it would run two
+   I2C transactions per `loop()` iteration, each bounded only by `I2C_TIMEOUT_MS` — enough
+   to drag `loop()` from ~1 ms to ~100 ms and make the brightness ramp visibly steppy,
+   without ever tripping the watchdog, because the loop is still running. After
+   `LIS3DH_FAULT_EMPTY_READS` consecutive empty reads it stops polling the accelerometer for
+   `LIS3DH_FAULT_BACKOFF_MS` and then retries; it recovers by itself if the bus does, and
+   the lamp's primary input is unaffected either way.
+4. **Task watchdog** (`esp_task_wdt`, see below) is the hard backstop for this and any other
    unforeseen stall.
+
+**Memory:** there is no dynamic allocation anywhere in the firmware — no `malloc`/`new`, no
+`String`, no STL containers. All state is file-scope statics plus the 8 KB `gammaLUT` in
+`.bss`, so the heap footprint is fixed at boot and a leak is not structurally possible.
+`getCompensatedPWM()` bounds-checks its LUT index defensively, since `brightness` is an
+`extern` global any module could in principle set and an out-of-range index would read past
+that 8 KB table and hand the LED an arbitrary duty.
+
+**Crash recovery:** a watchdog panic reboots into `setup()` with a non-wake reset reason, so
+the lamp comes up OFF. In pot mode it then self-heals on the first `loop()` iteration — the
+pot is still up, so `updatePotControl()` sees "wants ON, lamp is OFF" and relights at the
+dial's position (the auto-off latch is the one deliberate exception). Button mode stays off
+until the next tap. See *Releasing pin holds is unconditional* above for the one reset path
+that used to leave the device unable to come back.
 
 ### Task Watchdog Timer
 
@@ -336,7 +428,17 @@ RTC_DATA_ATTR uint8_t  savedMode      = MODE_WARM;
 RTC_DATA_ATTR uint16_t warmBrightness = DEFAULT_BRIGHTNESS;  // = MAX_BRIGHTNESS
 RTC_DATA_ATTR uint16_t coolBrightness = DEFAULT_BRIGHTNESS;
 RTC_DATA_ATTR uint16_t bootCount      = 0;  // debug
+
+#ifdef USE_POT_INPUT
+RTC_DATA_ATTR bool     potAutoOffLatched = false;  // auto-off fired; don't relight yet
+RTC_DATA_ATTR uint16_t potAutoOffTarget  = 0;      // dial position it fired at
+#endif
 ```
+
+`potAutoOffLatched`/`potAutoOffTarget` are pot mode only, and are the one piece of state
+that specifically *needs* to survive deep sleep rather than merely benefiting from it — see
+the auto-off latch bullet under Potentiometer mode. Losing them on a reflash or battery
+disconnect is harmless: the worst case is one extra auto-off cycle.
 
 `warmBrightness`/`coolBrightness` are only meaningful in button mode, where brightness is
 an app-managed value that needs remembering per mode. In pot mode brightness is never
@@ -368,7 +470,7 @@ Tests include `.cpp` source files directly (not via linking). The mock Arduino e
 | Touch gestures (button mode) | `test/test_touch/test_touch_input.cpp` | 11 |
 | Pot mapping, hysteresis & filtering (pot mode) | `test/test_pot/test_pot_input.cpp` | 16 |
 | Battery state machine | `test/test_battery/test_battery_state_machine.cpp` | 15 |
-| LED/brightness — battery ceiling clamp | `test/test_led_control/test_led_control.cpp` | 9 |
+| LED/brightness — battery ceiling clamp, pot-mode ramp-down | `test/test_led_control/test_led_control.cpp` | 17 |
 
 **`test_led_control`** is the one suite that includes `led_control.cpp` itself (alongside
 `battery_monitor.cpp`, since `getCompensatedPWM()`/`clampToBatteryLimit()` call into it) —
